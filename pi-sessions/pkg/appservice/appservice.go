@@ -31,6 +31,7 @@ import (
 	"go.mau.fi/pi-matrix/pkg/config"
 	"go.mau.fi/pi-matrix/pkg/matrix"
 	"go.mau.fi/pi-matrix/pkg/sessionmanager"
+	"go.mau.fi/pi-matrix/pkg/store"
 )
 
 // AppService handles Matrix events and routes them to/from the Session Manager.
@@ -38,6 +39,7 @@ type AppService struct {
 	config   config.Config
 	mxClient *matrix.Client
 	sessClient *sessionmanager.Client
+	store    *store.Store
 
 	// Track DM rooms for users
 	dmRooms map[string]id.RoomID
@@ -59,17 +61,24 @@ func NewAppService(
 	cfg config.Config,
 	mxClient *matrix.Client,
 	sessClient *sessionmanager.Client,
+	s *store.Store,
 	logger zerolog.Logger,
 ) *AppService {
 	as := &AppService{
 		config:       cfg,
 		mxClient:     mxClient,
 		sessClient:   sessClient,
+		store:        s,
 		dmRooms:      make(map[string]id.RoomID),
 		controlRooms: make(map[string]id.RoomID),
 		sessionRooms: make(map[string]id.RoomID),
 		userSessions: make(map[string]string),
 		logger:       logger,
+	}
+
+	// Restore session rooms from store if available
+	if s != nil {
+		as.restoreSessionRooms()
 	}
 
 	// Register event handlers
@@ -84,6 +93,50 @@ func NewAppService(
 	sessClient.OnSessionEvent(as.onSessionEvent)
 
 	return as
+}
+
+// restoreSessionRooms restores session room mappings from the store.
+func (as *AppService) restoreSessionRooms() {
+	portals, err := as.store.GetAllPortals()
+	if err != nil {
+		as.logger.Warn().Err(err).Msg("failed to restore portals from store")
+		return
+	}
+
+	for _, p := range portals {
+		as.sessionRooms[p.SessionID] = p.RoomID
+		as.logger.Info().
+			Str("session_id", p.SessionID).
+			Str("room_id", string(p.RoomID)).
+			Msg("restored session room from store")
+	}
+}
+
+// saveSessionRoom saves a session room mapping to the store.
+func (as *AppService) saveSessionRoom(sessionID string, roomID id.RoomID) {
+	if as.store == nil {
+		return
+	}
+
+	portal := &store.Portal{
+		SessionID: sessionID,
+		RoomID:    roomID,
+		RoomName:  string(roomID),
+	}
+	if err := as.store.SavePortal(portal); err != nil {
+		as.logger.Warn().Err(err).Msg("failed to save portal to store")
+	}
+}
+
+// deleteSessionRoom removes a session room mapping from the store.
+func (as *AppService) deleteSessionRoom(sessionID string) {
+	if as.store == nil {
+		return
+	}
+
+	if err := as.store.DeletePortal(sessionID); err != nil {
+		as.logger.Warn().Err(err).Msg("failed to delete portal from store")
+	}
 }
 
 // onRoomMessage handles messages in session rooms.
@@ -254,6 +307,7 @@ func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, pat
 	// Track the session
 	as.sessionRooms[sessionID] = room.ID
 	as.userSessions[string(sender)] = sessionID
+	as.saveSessionRoom(sessionID, room.ID)
 
 	// Send messages
 	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started in %s", absPath))
@@ -380,6 +434,8 @@ func (as *AppService) handleNewCommand(roomID id.RoomID) {
 	// Update session-room mapping
 	as.sessionRooms[oldSessionID] = "" // Clear old
 	as.sessionRooms[newSessionID] = roomID
+	as.saveSessionRoom(newSessionID, roomID)
+	as.deleteSessionRoom(oldSessionID)
 
 	as.mxClient.SendNotice(ctx, roomID, "Session reset. Previous context has been cleared. Start fresh!")
 }
