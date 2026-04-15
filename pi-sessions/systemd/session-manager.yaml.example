@@ -1,20 +1,54 @@
 # Pi Session Manager Configuration
-# /etc/pi-matrix/session-manager.yaml
+# /etc/pi-session-manager/config.yaml
+#
+# This config is for the pi-session-manager (runs on each machine).
+# The appservice (pi-matrix) runs on the Matrix homeserver.
 
-session_manager:
-  # Network settings
+homeserver:
+  # Matrix homeserver address (needed for some operations)
+  address: http://localhost:8008
+  domain: matrix.example.com
+
+appservice:
+  # Appservice URL (appservice connects to this)
+  url: http://localhost:8080
+
+api:
+  # Network settings for the session manager HTTP server
   host: 0.0.0.0
-  port: 8081
+  port: 19081
   
   # API key for authenticating appservice connections
   # Generate with: openssl rand -base64 32
   api_key: ""
+
+bridge:
+  # Room name prefix
+  room_name_prefix: "Pi"
+  
+  # Auto-create rooms
+  auto_create_rooms: true
+  
+  # Session limits
+  max_sessions: 10
+  
+  # Session timeout in seconds (0 = no timeout)
+  session_timeout: 3600
+
+session_manager:
+  # Network settings
+  host: 0.0.0.0
+  port: 19081
+  
+  # Machine name - identifies this machine to the appservice
+  # Used when routing /start commands: /start <machine_name> <path>
+  machine_name: "desktop"
   
   # Path to pi executable
   pi_path: /usr/local/bin/pi
   
   # Agent directory for pi
-  agent_dir: /var/lib/pi/agent
+  agent_dir: ~/.pi/agent
   
   # Session limits
   max_sessions: 10
@@ -24,6 +58,13 @@ session_manager:
 
   # Data directory for session persistence (SQLite DB)
   data_dir: /var/lib/pi-session-manager
+
+pi:
+  path: /usr/local/bin/pi
+  agent_dir: ~/.pi/agent
+
+database:
+  url: /var/lib/pi-session-manager/sessions.db
 
 # Logging
 logging:

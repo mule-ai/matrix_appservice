@@ -37,8 +37,8 @@ api:
 
 # Bridge settings
 bridge:
-    # Prefix for room names
-    room_name_prefix: "Pi Session"
+    # Prefix for room names (machine name will be appended)
+    room_name_prefix: "Pi"
     
     # Automatically create rooms when sessions start
     auto_create_rooms: true
@@ -51,6 +51,25 @@ bridge:
     
     # Session timeout in seconds (0 = no timeout)
     session_timeout: 3600
+
+# Session Managers (appservice connects to these)
+# Multiple managers allow distributing sessions across machines
+session_managers:
+  managers:
+    - name: "desktop"
+      url: http://192.168.1.10:19081
+      api_key: ""
+    - name: "laptop"
+      url: http://192.168.1.20:19081
+      api_key: ""
+    - name: "server"
+      url: http://server.example.com:19081
+      api_key: ""
+
+# For backwards compatibility with single manager:
+# session_manager:
+#   url: http://localhost:19081
+#   machine_name: "default"
 
 # pi executable settings
 pi:

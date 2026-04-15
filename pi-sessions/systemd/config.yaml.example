@@ -1,12 +1,15 @@
 # Pi Matrix Appservice Configuration
 # /etc/pi-matrix/config.yaml
+#
+# This config is for the pi-matrix appservice (runs on Matrix homeserver).
+# The session manager (pi-session-manager) runs separately on each machine.
 
 homeserver:
   # Matrix homeserver address
   address: http://localhost:8008
   
   # Matrix homeserver domain (for user IDs)
-  domain: localhost
+  domain: matrix.example.com
 
 appservice:
   # Unique ID for this appservice
@@ -16,7 +19,10 @@ appservice:
   localpart: pi-matrix
   
   # URL where this appservice is reachable (from homeserver perspective)
-  url: http://localhost:8080
+  url: http://0.0.0.0:8080
+  
+  # Port the appservice listens on
+  port: 8080
   
   # Path to registration file
   registration_path: /etc/pi-matrix/registration.yaml
@@ -34,8 +40,8 @@ api:
   port: 8080
 
 bridge:
-  # Room name prefix
-  room_name_prefix: "Pi Session"
+  # Room name prefix (machine name will be appended)
+  room_name_prefix: "Pi"
   
   # Auto-create rooms
   auto_create_rooms: true
@@ -43,16 +49,32 @@ bridge:
   # Delete rooms when sessions exit
   delete_rooms_on_exit: false
   
-  # Session limits
-  max_sessions: 10
-  session_timeout: 3600
+  # Session limits (0 = unlimited)
+  max_sessions: 0
+  session_timeout: 0
 
-session_manager:
-  # URL of the session manager
-  url: http://localhost:8081
-  
-  # API key (must match session-manager.yaml)
-  api_key: ""
+database:
+  # SQLite database path
+  url: /var/lib/pi-matrix/bridge.db
+
+# Session Managers - connect to multiple pi-session-manager instances
+# Each machine that runs pi needs its own session manager
+session_managers:
+  managers:
+    - name: "desktop"
+      url: http://192.168.1.10:19081
+      api_key: ""
+    - name: "laptop"
+      url: http://192.168.1.20:19081
+      api_key: ""
+    - name: "server"
+      url: http://server.example.com:19081
+      api_key: ""
+
+# pi executable settings (used by session managers to spawn pi)
+pi:
+  path: /usr/local/bin/pi
+  agent_dir: ~/.pi/agent
 
 # Logging
 logging:
