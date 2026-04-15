@@ -411,10 +411,16 @@ func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 }
 
 // SendMessage sends a text message to a room.
-// Content is sent as plain text.
+// If content contains markdown, it will be converted to HTML for better rendering.
 func (c *Client) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {
-	// Clean up the content - remove problematic UTF-8 chars
+	// Clean up problematic characters
 	clean := cleanupContent(content)
+	
+	// Convert markdown to HTML for rich rendering
+	plain, html := ConvertMarkdownToHTML(clean)
+	if html != "" {
+		return c.SendFormattedMessage(ctx, roomID, plain, "org.matrix.custom.html", html)
+	}
 	return c.SendFormattedMessage(ctx, roomID, clean, "", "")
 }
 
