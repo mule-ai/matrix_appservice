@@ -173,7 +173,14 @@ func (s *Session) Start(ctx context.Context) error {
 	}
 
 	// Use background context - we don't want the HTTP request context to kill the subprocess
-	s.cmd = exec.Command(piPath, "--mode", "rpc")
+	// Use --continue to resume session if this session was previously started
+	args := []string{"--mode", "rpc"}
+	if s.State != StatePending {
+		// Session was previously started, resume it
+		args = append(args, "--continue")
+		s.logger.Info().Msg("resuming previous session")
+	}
+	s.cmd = exec.Command(piPath, args...)
 	s.cmd.Dir = s.Directory
 
 	env := os.Environ()
