@@ -149,6 +149,9 @@ func (s *Session) UpdateActivity() {
 
 // Start starts the pi subprocess.
 func (s *Session) Start(ctx context.Context) error {
+	// Save original state to determine if we should resume
+	wasRunning := s.State == StateRunning
+	
 	s.SetState(StateStarting)
 
 	piPath, err := exec.LookPath(s.PiConfig.PiPath)
@@ -173,10 +176,10 @@ func (s *Session) Start(ctx context.Context) error {
 	}
 
 	// Use background context - we don't want the HTTP request context to kill the subprocess
-	// Use --continue to resume session if this session was previously started
+	// Use --continue to resume session if this session was previously running
 	args := []string{"--mode", "rpc"}
-	if s.State != StatePending {
-		// Session was previously started, resume it
+	if wasRunning {
+		// Session was previously running, resume it
 		args = append(args, "--continue")
 		s.logger.Info().Msg("resuming previous session")
 	}
