@@ -162,10 +162,16 @@ func (as *AppService) onRoomMessage(roomID id.RoomID, sender id.UserID, content 
 			return
 		}
 
+		// Handle /steer command to interrupt and redirect agent
+		if cmd == "steer" {
+			as.handleSteerCommand(sender, roomID, content)
+			return
+		}
+
 		// Handle /help in room
 		if cmd == "help" {
 			ctx := context.Background()
-			as.mxClient.SendNotice(ctx, roomID, "Room commands:\n/new - Reset session with clean context\n/help - Show this help")
+			as.mxClient.SendNotice(ctx, roomID, "Room commands:\n/new - Reset session with clean context\n/steer <message> - Interrupt agent and redirect\n/help - Show this help")
 			return
 		}
 
@@ -487,6 +493,53 @@ func (as *AppService) handleNewCommand(roomID id.RoomID) {
 	as.deleteSessionRoom(oldSessionID)
 
 	as.mxClient.SendNotice(ctx, roomID, "Session reset. Previous context has been cleared. Start fresh!")
+}
+
+// handleSteerCommand handles /steer command to interrupt and redirect the agent.
+func (as *AppService) handleSteerCommand(sender id.UserID, roomID id.RoomID, content string) {
+	// Extract the message from /steer <message>
+	message := strings.TrimPrefix(content, "/steer")
+	message = strings.TrimSpace(message)
+
+	if message == "" {
+		ctx := context.Background()
+		as.mxClient.SendNotice(ctx, roomID, "Usage: /steer <message>\nInterrupts the current task and sends your message.")
+		return
+	}
+
+	// Find session for this room
+	sessionID := ""
+	for sessID, rID := range as.sessionRooms {
+		if rID == roomID {
+			sessionID = sessID
+			break
+		}
+	}
+
+	if sessionID == "" {
+		ctx := context.Background()
+		as.mxClient.SendNotice(ctx, roomID, "No session found for this room. Use /start <path> to create one.")
+		return
+	}
+
+	// Send steer prompt
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	as.logger.Info().
+		Str("session_id", sessionID).
+		Str("room_id", string(roomID)).
+		Str("message", message).
+		Msg("steering agent")
+
+	// Notify user we're steering
+	as.mxClient.SendNotice(ctx, roomID, "Steering agent...")
+
+	if err := as.sessClient.SteerPrompt(ctx, sessionID, message); err != nil {
+		as.logger.Error().Err(err).Str("session_id", sessionID).Msg("failed to steer prompt")
+		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error steering: %v", err))
+		return
+	}
 }
 
 // onRoomJoin handles a user joining a room.

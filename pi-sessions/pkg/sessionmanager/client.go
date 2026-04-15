@@ -434,6 +434,55 @@ func (c *Client) SendPrompt(ctx context.Context, sessionID, message string) erro
 	return fmt.Errorf("session not found on any manager: %w", lastErr)
 }
 
+// SteerPrompt sends a prompt with steering (interrupts current task).
+func (c *Client) SteerPrompt(ctx context.Context, sessionID, message string) error {
+	c.mu.RLock()
+	managers := make(map[string]*httpClient)
+	for k, v := range c.managers {
+		managers[k] = v
+	}
+	c.mu.RUnlock()
+
+	var lastErr error
+	for name, mgr := range managers {
+		c.logger.Info().Str("manager", name).Str("session_id", sessionID).Msg("trying to steer prompt")
+		err := c.trySteerPrompt(ctx, mgr, sessionID, message)
+		if err == nil {
+			c.logger.Info().Str("manager", name).Str("session_id", sessionID).Msg("steer prompt sent successfully")
+			return nil
+		}
+		lastErr = err
+		c.logger.Warn().Err(err).Str("manager", name).Str("session_id", sessionID).Msg("steer prompt failed on this manager")
+	}
+
+	return fmt.Errorf("session not found on any manager: %w", lastErr)
+}
+
+// trySteerPrompt attempts to send a steer prompt to a specific manager.
+func (c *Client) trySteerPrompt(ctx context.Context, mgr *httpClient, sessionID, message string) error {
+	reqBody := map[string]string{
+		"message":           message,
+		"streamingBehavior": "steer",
+	}
+
+	resp, err := mgr.doRequest(ctx, "POST", "/sessions/"+sessionID+"/prompt", reqBody)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("session not found")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // trySendPrompt attempts to send a prompt to a specific manager.
 func (c *Client) trySendPrompt(ctx context.Context, mgr *httpClient, sessionID, message string) error {
 	reqBody := map[string]string{
