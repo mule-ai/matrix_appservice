@@ -481,22 +481,34 @@ func stripMarkdown(content string) string {
 
 // removeSpecialChars removes problematic UTF-8 characters.
 func removeSpecialChars(s string) string {
-	// Common box-drawing characters and other special chars that don't render well
+	result := s
+
+	// Replace em dashes with regular dash using Unicode code points
+	result = strings.ReplaceAll(result, string(rune(0x2013)), "-") // en dash
+	result = strings.ReplaceAll(result, string(rune(0x2014)), "-") // em dash
+	result = strings.ReplaceAll(result, string(rune(0x2018)), "'") // left single quote
+	result = strings.ReplaceAll(result, string(rune(0x2019)), "'") // right single quote
+	result = strings.ReplaceAll(result, string(rune(0x201C)), "'") // left double quote
+	result = strings.ReplaceAll(result, string(rune(0x201D)), "'") // right double quote
+	result = strings.ReplaceAll(result, string(rune(0x2022)), "-") // bullet
+	result = strings.ReplaceAll(result, string(rune(0x2192)), "->") // right arrow
+	result = strings.ReplaceAll(result, string(rune(0x2190)), "<-") // left arrow
+
+	// Common box-drawing characters and other special chars
 	specialChars := []string{
-		"─", "│", "├", "┤", "┌", "┐", "└", "┘", "│",
+		"─", "│", "├", "┤", "┌", "┐", "└", "┘",
 		"═", "║", "╔", "╗", "╚", "╝", "╠", "╣",
 		"━", "┃", "┏", "┓", "┗", "┛", "┣", "┫",
-		"•", "→", "←", "↑", "↓", "⇒", "⇐", "⇔",
-		"🎯", "✅", "❌", "🔧", // Emoji that may cause issues
 	}
-	result := s
 	for _, c := range specialChars {
 		result = strings.ReplaceAll(result, c, "")
 	}
+
 	// Replace multiple spaces with single space
 	for strings.Contains(result, "  ") {
 		result = strings.ReplaceAll(result, "  ", " ")
 	}
+
 	return strings.TrimSpace(result)
 }
 
