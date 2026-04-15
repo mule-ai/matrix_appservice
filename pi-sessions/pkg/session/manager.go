@@ -90,12 +90,104 @@ func (m *Manager) SetStore(store *store.Store) error {
 		}
 		sess.pendingRequests = make(map[string]chan *RpcResponse)
 		
+		// Set up event handler for restored sessions too
+		// Uses m.broadcast which may be nil until SetBroadcaster is called
+		sess.SetEventHandler(func(s *Session, event *SessionEvent) {
+			m.handleSessionEvent(s, event)
+		})
+		
 		m.mu.Lock()
 		m.sessions[ms.SessionID] = sess
 		m.mu.Unlock()
 	}
 	
 	return nil
+}
+
+// handleSessionEvent processes session events and broadcasts them.
+func (m *Manager) handleSessionEvent(s *Session, event *SessionEvent) {
+	m.logger.Debug().
+		Str("session_id", s.ID).
+		Str("event_type", event.Type).
+		Int("content_index", event.ContentIndex).
+		Str("text_preview", func() string { l := len(event.Text); if l > 30 { return event.Text[:30] + "..." }; return event.Text }()).
+		Msg("handling session event")
+	
+	e := &Event{
+		SessionID: s.ID,
+	}
+	
+	m.mu.RLock()
+	broadcast := m.broadcast
+	m.mu.RUnlock()
+	
+	switch event.Type {
+	case "agent_start":
+		e.Type = "typing_start"
+		if broadcast != nil {
+			broadcast(e)
+		}
+	case "agent_end":
+		e.Type = "typing_stop"
+		if broadcast != nil {
+			broadcast(e)
+		}
+	case "message":
+		e.Type = "message"
+		e.Content = event.Text
+		if broadcast != nil {
+			broadcast(e)
+		}
+	case "text_delta":
+		// Accumulate text for later emission
+		m.mu.Lock()
+		if m.accumulatedText[s.ID] == nil {
+			m.accumulatedText[s.ID] = make(map[int]string)
+			m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Msg("initialized accumulator for contentIndex")
+		}
+		m.accumulatedText[s.ID][event.ContentIndex] += event.Text
+		m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Int("accumulated_len", len(m.accumulatedText[s.ID][event.ContentIndex])).Msg("text_delta accumulated")
+		m.mu.Unlock()
+	case "text_end":
+		// Emit accumulated text as a message
+		m.mu.Lock()
+		text := ""
+		if m.accumulatedText[s.ID] != nil {
+			text = m.accumulatedText[s.ID][event.ContentIndex]
+			delete(m.accumulatedText[s.ID], event.ContentIndex)
+		}
+		m.mu.Unlock()
+		m.logger.Debug().
+			Str("session_id", s.ID).
+			Int("content_index", event.ContentIndex).
+			Str("accumulated_text", text).
+			Msg("text_end received")
+		if text != "" {
+			e.Type = "message"
+			e.Content = text
+			if broadcast != nil {
+				broadcast(e)
+			}
+		} else {
+			m.logger.Warn().
+				Str("session_id", s.ID).
+				Int("content_index", event.ContentIndex).
+				Msg("text_end received but no accumulated text!")
+		}
+	case "tool_start":
+		e.Type = "tool_start"
+		e.ToolName = event.ToolName
+		if broadcast != nil {
+			broadcast(e)
+		}
+	case "tool_end":
+		e.Type = "tool_end"
+		e.ToolName = event.ToolName
+		e.IsError = event.IsError
+		if broadcast != nil {
+			broadcast(e)
+		}
+	}
 }
 
 // NewManager creates a new session manager.
@@ -152,76 +244,7 @@ func (m *Manager) CreateSession(ctx context.Context, directory, userID string, b
 
 	// Set up event handler to broadcast events
 	sess.SetEventHandler(func(s *Session, event *SessionEvent) {
-		e := &Event{
-			SessionID: s.ID,
-		}
-		switch event.Type {
-		case "agent_start":
-			e.Type = "typing_start"
-			if broadcast != nil {
-				broadcast(e)
-			}
-		case "agent_end":
-			e.Type = "typing_stop"
-			if broadcast != nil {
-				broadcast(e)
-			}
-		case "message":
-			e.Type = "message"
-			e.Content = event.Text
-			if broadcast != nil {
-				broadcast(e)
-			}
-		case "text_delta":
-			// Accumulate text for later emission
-			m.mu.Lock()
-			if m.accumulatedText[s.ID] == nil {
-				m.accumulatedText[s.ID] = make(map[int]string)
-				m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Msg("initialized accumulator for contentIndex")
-			}
-			m.accumulatedText[s.ID][event.ContentIndex] += event.Text
-			m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Int("accumulated_len", len(m.accumulatedText[s.ID][event.ContentIndex])).Msg("text_delta accumulated")
-			m.mu.Unlock()
-		case "text_end":
-			// Emit accumulated text as a message
-			m.mu.Lock()
-			text := ""
-			if m.accumulatedText[s.ID] != nil {
-				text = m.accumulatedText[s.ID][event.ContentIndex]
-				delete(m.accumulatedText[s.ID], event.ContentIndex)
-			}
-			m.mu.Unlock()
-			m.logger.Debug().
-				Str("session_id", s.ID).
-				Int("content_index", event.ContentIndex).
-				Str("accumulated_text", text).
-				Msg("text_end received")
-			if text != "" {
-				e.Type = "message"
-				e.Content = text
-				if broadcast != nil {
-					broadcast(e)
-				}
-			} else {
-				m.logger.Warn().
-					Str("session_id", s.ID).
-					Int("content_index", event.ContentIndex).
-					Msg("text_end received but no accumulated text!")
-			}
-		case "tool_start":
-			e.Type = "tool_start"
-			e.ToolName = event.ToolName
-			if broadcast != nil {
-				broadcast(e)
-			}
-		case "tool_end":
-			e.Type = "tool_end"
-			e.ToolName = event.ToolName
-			e.IsError = event.IsError
-			if broadcast != nil {
-				broadcast(e)
-			}
-		}
+		m.handleSessionEvent(s, event)
 	})
 
 	// Register

@@ -377,7 +377,8 @@ func (s *Session) handleLine(line string) {
 	// Try message_update event (has nested assistantMessageEvent)
 	var msgUpdate MessageUpdateEvent
 	if err := json.Unmarshal([]byte(line), &msgUpdate); err == nil && msgUpdate.Type == "message_update" {
-		if msgUpdate.AssistantMessageEvent != nil {
+		if msgUpdate.AssistantMessageEvent != nil { 
+			// Nested struct unmarshal worked
 			// Extract the nested event type and emit it
 			// Use Delta for text_delta, Content for text_end
 			text := msgUpdate.AssistantMessageEvent.Delta
@@ -469,13 +470,16 @@ type SessionEvent struct {
 
 // MessageUpdateEvent represents a message_update event from pi (contains assistantMessageEvent)
 type MessageUpdateEvent struct {
-	Type               string `json:"type"`
-	AssistantMessageEvent *struct {
-		Type         string `json:"type"`
-		Delta        string `json:"delta,omitempty"`
-		Content      string `json:"content,omitempty"`
-		ContentIndex int    `json:"contentIndex,omitempty"`
-	} `json:"assistantMessageEvent,omitempty"`
+	Type                  string          `json:"type"`
+	AssistantMessageEvent *AssistantEvent `json:"assistantMessageEvent,omitempty"`
+}
+
+// AssistantEvent represents the nested assistantMessageEvent in message_update
+type AssistantEvent struct {
+	Type         string `json:"type"`
+	Delta        string `json:"delta,omitempty"`
+	Content      string `json:"content,omitempty"`
+	ContentIndex int    `json:"contentIndex,omitempty"`
 }
 
 // ToolExecutionStartEvent represents a tool_execution_start event from pi
