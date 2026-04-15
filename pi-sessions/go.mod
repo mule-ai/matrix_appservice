@@ -13,9 +13,13 @@ require (
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/aymerick/douceur v0.2.0 // indirect
 	github.com/coder/websocket v1.8.14 // indirect
+	github.com/gomarkdown/markdown v0.0.0-20260412113850-134a5b2cce7f // indirect
+	github.com/gorilla/css v1.0.1 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect

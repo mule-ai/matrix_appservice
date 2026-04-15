@@ -17,6 +17,7 @@
 package matrix
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -24,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gomarkdown/markdown"
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
@@ -406,8 +409,45 @@ func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 }
 
 // SendMessage sends a text message to a room.
+// If the content contains markdown formatting, it will be converted to HTML.
 func (c *Client) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {
+	// Convert markdown to HTML for better Matrix rendering
+	plain, html := ConvertMarkdownToHTML(content)
+	if html != "" {
+		return c.SendFormattedMessage(ctx, roomID, plain, "org.matrix.custom.html", html)
+	}
 	return c.SendFormattedMessage(ctx, roomID, content, "", "")
+}
+
+// ConvertMarkdownToHTML converts markdown text to HTML.
+// Returns plain text and HTML version.
+func ConvertMarkdownToHTML(content string) (string, string) {
+	// Check if content has markdown markers
+	hasMarkdown := false
+	if bytes.Contains([]byte(content), []byte("```")) ||
+		bytes.Contains([]byte(content), []byte("`")) ||
+		bytes.Contains([]byte(content), []byte("**")) ||
+		bytes.Contains([]byte(content), []byte("__")) ||
+		bytes.Contains([]byte(content), []byte("##")) ||
+		bytes.Contains([]byte(content), []byte("```")) {
+		hasMarkdown = true
+	}
+
+	if !hasMarkdown {
+		return content, ""
+	}
+
+	// Convert markdown to HTML
+	html := markdown.ToHTML([]byte(content), nil, nil)
+
+	// Sanitize HTML to prevent XSS (bluemonday)
+	policy := bluemonday.UGCPolicy()
+	sanitized := policy.Sanitize(string(html))
+
+	// Convert newlines to <br> for display
+	sanitized = string(bytes.ReplaceAll([]byte(sanitized), []byte("\n"), []byte("<br>")))
+
+	return content, string(sanitized)
 }
 
 // SendFormattedMessage sends a formatted message to a room.
