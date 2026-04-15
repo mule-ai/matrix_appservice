@@ -420,12 +420,14 @@ func (c *Client) SendPrompt(ctx context.Context, sessionID, message string) erro
 
 	var lastErr error
 	for name, mgr := range managers {
+		c.logger.Info().Str("manager", name).Str("session_id", sessionID).Msg("trying to send prompt")
 		err := c.trySendPrompt(ctx, mgr, sessionID, message)
 		if err == nil {
+			c.logger.Info().Str("manager", name).Str("session_id", sessionID).Msg("prompt sent successfully")
 			return nil
 		}
 		lastErr = err
-		c.logger.Debug().Err(err).Str("manager", name).Str("session_id", sessionID).Msg("send prompt failed on this manager")
+		c.logger.Warn().Err(err).Str("manager", name).Str("session_id", sessionID).Msg("send prompt failed on this manager")
 	}
 
 	return fmt.Errorf("session not found on any manager: %w", lastErr)

@@ -194,12 +194,15 @@ func (as *AppService) onRoomMessage(roomID id.RoomID, sender id.UserID, content 
 	defer cancel()
 
 	if err := as.sessClient.SendPrompt(ctx, sessionID, content); err != nil {
-		as.logger.Error().Err(err).Str("session_id", sessionID).Msg("failed to send prompt")
+		as.logger.Error().Err(err).Str("session_id", sessionID).Str("room_id", string(roomID)).Msg("failed to send prompt")
 		// Session may have been lost (e.g., session manager restarted)
 		// Clean up tracking and tell user to start a new session
 		as.logger.Info().Str("session_id", sessionID).Msg("removing dead session")
 		delete(as.sessionRooms, sessionID)
-		as.mxClient.SendNotice(ctx, roomID, "Error: Session lost. Please use /start to create a new session.")
+		
+		// Notify user with clear instructions
+		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: %v\n\nYour session may have expired. Please use /start <machine> <path> to create a new session.\nAvailable machines: %s", 
+			err, strings.Join(as.sessClient.GetAvailableManagers(), ", ")))
 		return
 	}
 }
