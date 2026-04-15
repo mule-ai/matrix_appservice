@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -104,40 +105,76 @@ func (c *Client) OnSessionEvent(handler func(*SessionEvent)) {
 }
 
 // StartEventStream starts receiving events from the session manager via SSE.
+// It automatically reconnects if the connection is lost.
 func (c *Client) StartEventStream(ctx context.Context) error {
 	c.eventsCtx, c.eventsCancel = context.WithCancel(ctx)
 
-	c.logger.Info().Str("server", c.serverURL).Msg("starting event stream")
+	c.logger.Info().Str("server", c.serverURL).Msg("starting event stream with auto-reconnect")
 
-	req, err := http.NewRequestWithContext(c.eventsCtx, "GET", c.serverURL+"/events", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
-	}
-
-	c.eventsWg.Add(1)
-	go c.readEvents(resp)
+	// Start the event stream connection
+	go c.runEventStreamWithReconnect()
 
 	return nil
 }
 
+// runEventStreamWithReconnect handles connection and reconnection to the event stream.
+func (c *Client) runEventStreamWithReconnect() {
+	backoff := time.Second
+	maxBackoff := 30 * time.Second
+
+	for {
+		select {
+		case <-c.eventsCtx.Done():
+			c.logger.Info().Msg("event stream context cancelled, stopping")
+			return
+		default:
+		}
+
+		c.logger.Info().Str("server", c.serverURL).Msg("connecting to event stream")
+
+		req, err := http.NewRequestWithContext(c.eventsCtx, "GET", c.serverURL+"/events", nil)
+		if err != nil {
+			c.logger.Error().Err(err).Msg("failed to create event stream request")
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		if c.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			c.logger.Warn().Err(err).Msg("failed to connect to event stream")
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			c.logger.Warn().Int("status", resp.StatusCode).Msg("event stream returned error")
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		// Connected successfully, reset backoff
+		backoff = time.Second
+		c.logger.Info().Msg("connected to event stream")
+
+		// Read events until connection closes
+		c.readEvents(resp)
+
+		// Connection closed, wait before reconnecting
+		c.logger.Info().Msg("event stream disconnected, reconnecting...")
+		time.Sleep(backoff)
+	}
+}
+
 // readEvents reads SSE events from the response.
 func (c *Client) readEvents(resp *http.Response) {
-	defer c.eventsWg.Done()
-	defer resp.Body.Close()
-
 	// Simple line-based reading for SSE
 	// Format: "data: {json}\n\n"
 	var dataBuf string

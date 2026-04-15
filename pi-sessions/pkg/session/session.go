@@ -88,15 +88,16 @@ func newSession(directory, userID string, cfg config.SessionManagerConfig, logge
 		absDir = directory
 	}
 
+	sessionID := uuid.New().String()
 	return &Session{
-		ID:        uuid.New().String(),
+		ID:        sessionID,
 		Directory: absDir,
 		UserID:    userID,
 		State:     StatePending,
 		PiConfig:  cfg,
 		CreatedAt: time.Now(),
 		LastActivity: time.Now(),
-		logger: logger.With().Str("session_id", uuid.New().String()).Str("directory", absDir).Logger(),
+		logger: logger.With().Str("session_id", sessionID).Str("directory", absDir).Logger(),
 		pendingRequests: make(map[string]chan *RpcResponse),
 	}
 }
