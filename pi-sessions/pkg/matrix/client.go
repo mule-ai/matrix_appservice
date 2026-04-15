@@ -411,6 +411,49 @@ func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 	return room, nil
 }
 
+// CreateSessionRoomWithMachine creates a Matrix room for a pi session with machine name in the room name.
+func (c *Client) CreateSessionRoomWithMachine(ctx context.Context, machineName, sessionDir string, userID id.UserID) (*Room, error) {
+	c.logger.Info().
+		Str("machine", machineName).
+		Str("directory", sessionDir).
+		Str("user_id", string(userID)).
+		Msg("creating session room with machine name")
+
+	// Generate room name with machine name
+	roomName := fmt.Sprintf("%s: %s: %s", c.bridge.RoomNamePrefix, machineName, filepath.Base(sessionDir))
+
+	// Create the room
+	bot := c.as.BotIntent()
+
+	resp, err := bot.CreateRoom(ctx, &mautrix.ReqCreateRoom{
+		Name:   roomName,
+		Topic:  fmt.Sprintf("Pi session on %s: %s", machineName, sessionDir),
+		Preset: "private_chat",
+		Invite: []id.UserID{userID},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create room: %w", err)
+	}
+
+	room := &Room{
+		ID:         resp.RoomID,
+		Name:       roomName,
+		SessionDir: sessionDir,
+		CreatedAt:  time.Now(),
+	}
+
+	// Register the room
+	c.roomRegistry.Register(room)
+
+	c.logger.Info().
+		Str("room_id", string(room.ID)).
+		Str("machine", machineName).
+		Str("directory", sessionDir).
+		Msg("session room created with machine name")
+
+	return room, nil
+}
+
 // SendMessage sends a text message to a room.
 // If content contains markdown, it will be converted to HTML for better rendering.
 func (c *Client) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {

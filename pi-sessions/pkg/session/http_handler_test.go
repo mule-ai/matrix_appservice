@@ -179,6 +179,7 @@ func TestCreateSession(t *testing.T) {
 }
 
 // TestCreateSessionDirectoryNotFound tests creating a session with non-existent directory.
+// Note: The manager now creates the directory if it doesn't exist.
 func TestCreateSessionDirectoryNotFound(t *testing.T) {
 	ts := newTestServer(t, "")
 	defer ts.Server.Close()
@@ -189,8 +190,9 @@ func TestCreateSessionDirectoryNotFound(t *testing.T) {
 	}
 	resp, respBody := ts.doRequest("POST", "/sessions", body)
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected status 500, got %d: %s", resp.StatusCode, respBody)
+	// Directory is created automatically now
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("expected status 201, got %d: %s", resp.StatusCode, respBody)
 	}
 }
 

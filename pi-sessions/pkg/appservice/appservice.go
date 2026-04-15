@@ -264,39 +264,72 @@ func (as *AppService) handleCommand(sender id.UserID, dmRoom id.RoomID, content 
 }
 
 // handleStartCommand handles the /start command to create a new session.
-func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, path string) {
+// Command format: /start <machine_name> <directory> or /start <directory>
+func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, args string) {
 	ctx := context.Background()
 
-	path = strings.TrimSpace(path)
-	if path == "" {
-		path = "."
+	args = strings.TrimSpace(args)
+	if args == "" {
+		as.mxClient.SendNotice(ctx, dmRoom, "Usage: /start <machine_name> <directory> or /start <directory>\n\nExample: /start desktop /data/jbutler/git/project\nExample: /start laptop ~/work")
+		return
 	}
 
-	// Expand home directory
-	if strings.HasPrefix(path, "~/") {
+	var machineName, directory string
+
+	// Parse: /start <machine_name> <directory> or /start <directory>
+	parts := strings.SplitN(args, " ", 2)
+	if len(parts) == 2 {
+		machineName = strings.TrimSpace(parts[0])
+		directory = strings.TrimSpace(parts[1])
+	} else {
+		// Only directory provided, use default machine
+		machineName = ""
+		directory = parts[0]
+	}
+
+	// Expand home directory in path
+	if strings.HasPrefix(directory, "~/") {
 		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, path[2:])
+		directory = filepath.Join(home, directory[2:])
 	}
 
 	// Get absolute path
-	absPath, err := filepath.Abs(path)
+	absPath, err := filepath.Abs(directory)
 	if err != nil {
 		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: Invalid path: %v", err))
 		return
 	}
 
-	as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session in %s...", absPath))
+	// Check if machine name is valid
+	availableManagers := as.sessClient.GetAvailableManagers()
+	if machineName != "" {
+		valid := false
+		for _, m := range availableManagers {
+			if m == machineName {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Unknown machine: %s\nAvailable machines: %s", machineName, strings.Join(availableManagers, ", ")))
+			return
+		}
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session on %s in %s...", machineName, absPath))
+	} else {
+		machineName = availableManagers[0] // Use first/default manager
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session in %s...", absPath))
+	}
 
 	// Create session via session manager
-	sessionID, err := as.sessClient.CreateSession(ctx, absPath, string(sender))
+	sessionID, err := as.sessClient.CreateSession(ctx, machineName, absPath, string(sender))
 	if err != nil {
-		as.logger.Error().Err(err).Str("path", absPath).Msg("failed to create session")
+		as.logger.Error().Err(err).Str("machine", machineName).Str("path", absPath).Msg("failed to create session")
 		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
 		return
 	}
 
 	// Create session room and invite user
-	room, err := as.mxClient.CreateSessionRoom(ctx, absPath, sender)
+	room, err := as.mxClient.CreateSessionRoomWithMachine(ctx, machineName, absPath, sender)
 	if err != nil {
 		as.logger.Error().Err(err).Str("directory", absPath).Msg("failed to create session room")
 		as.mxClient.SendNotice(ctx, dmRoom, "Error: Failed to create session room")
@@ -310,12 +343,13 @@ func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, pat
 	as.saveSessionRoom(sessionID, room.ID)
 
 	// Send messages
-	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started in %s", absPath))
+	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started on %s in %s", machineName, absPath))
 	as.mxClient.SendNotice(ctx, dmRoom,
-		fmt.Sprintf("Session started! Join the room: %s", room.ID))
+		fmt.Sprintf("Session started on %s! Join the room: %s", machineName, room.ID))
 
 	as.logger.Info().
 		Str("session_id", sessionID).
+		Str("machine", machineName).
 		Str("directory", absPath).
 		Str("room_id", string(dmRoom)).
 		Str("user_id", string(sender)).
@@ -338,7 +372,7 @@ func (as *AppService) handleListCommand(ctx context.Context, sender id.UserID, d
 	var lines []string
 	lines = append(lines, "Active sessions:")
 	for _, s := range sessions {
-		lines = append(lines, fmt.Sprintf("  • %s (user: %s)", s.Directory, s.UserID))
+		lines = append(lines, fmt.Sprintf("  • %s on %s (user: %s)", s.Directory, s.MachineName, s.UserID))
 	}
 
 	as.mxClient.SendNotice(ctx, dmRoom, strings.Join(lines, "\n"))
@@ -370,18 +404,28 @@ func (as *AppService) handleStopCommand(ctx context.Context, sender id.UserID, d
 
 // handleHelpCommand handles the /help command.
 func (as *AppService) handleHelpCommand(ctx context.Context, sender id.UserID, dmRoom id.RoomID) {
-	help := `Pi Matrix Bot Commands:
+	availableManagers := as.sessClient.GetAvailableManagers()
+	managerList := ""
+	if len(availableManagers) > 0 {
+		managerList = "\nAvailable machines: " + strings.Join(availableManagers, ", ")
+	}
+	
+	help := fmt.Sprintf(`Pi Matrix Bot Commands:
 
-/start <path> - Start a new pi session in the specified directory
-                (defaults to current directory if not specified)
+/start <machine> <path> - Start a new pi session on the specified machine
+/start <path>           - Start a new pi session (uses first available machine)
+                         Examples:
+                           /start desktop /data/jbutler/git/project
+                           /start laptop ~/work
+                           /start /data/jbutler/git/mule-ai%[1]s
 
-/list          - List all active sessions
+/list   - List all active sessions (shows machine, directory, user)
 
-/stop          - Stop your active session
+/stop   - Stop your active session
 
-/help          - Show this help message
+/help   - Show this help message
 
-To interact with a session, join its Matrix room. Messages will be forwarded to pi.`
+To interact with a session, join its Matrix room. Messages will be forwarded to pi.`, managerList)
 
 	as.mxClient.SendNotice(ctx, dmRoom, help)
 }
@@ -413,9 +457,11 @@ func (as *AppService) handleNewCommand(roomID id.RoomID) {
 
 	directory := session.Directory
 	userID := session.UserID
+	machineName := session.MachineName
 
 	as.logger.Info().
 		Str("old_session_id", oldSessionID).
+		Str("machine", machineName).
 		Str("directory", directory).
 		Msg("resetting session with /new")
 
@@ -424,8 +470,8 @@ func (as *AppService) handleNewCommand(roomID id.RoomID) {
 		as.logger.Warn().Err(err).Str("session_id", oldSessionID).Msg("failed to delete old session")
 	}
 
-	// Create new session in same directory
-	newSessionID, err := as.sessClient.CreateSession(ctx, directory, userID)
+	// Create new session in same directory and machine
+	newSessionID, err := as.sessClient.CreateSession(ctx, machineName, directory, userID)
 	if err != nil {
 		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: Failed to create new session: %v", err))
 		return

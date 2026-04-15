@@ -44,12 +44,13 @@ type Portal struct {
 
 // ManagedSession represents a session tracked by the session manager.
 type ManagedSession struct {
-	SessionID string `json:"session_id"`
-	Directory string `json:"directory"`
-	UserID    string `json:"user_id"`
-	RoomID    string `json:"room_id"`
-	State     string `json:"state"`
-	CreatedAt int64  `json:"created_at"`
+	SessionID   string `json:"session_id"`
+	Directory   string `json:"directory"`
+	UserID      string `json:"user_id"`
+	MachineName string `json:"machine_name"`
+	RoomID      string `json:"room_id"`
+	State       string `json:"state"`
+	CreatedAt   int64  `json:"created_at"`
 }
 
 // Config stores global bridge configuration.
@@ -90,6 +91,7 @@ func (s *Store) InitManagerSchema() error {
 		session_id TEXT PRIMARY KEY,
 		directory TEXT NOT NULL,
 		user_id TEXT NOT NULL,
+		machine_name TEXT NOT NULL DEFAULT 'unknown',
 		room_id TEXT NOT NULL,
 		state TEXT NOT NULL,
 		created_at INTEGER NOT NULL
@@ -99,7 +101,18 @@ func (s *Store) InitManagerSchema() error {
 	`
 	
 	_, err := s.db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Migrate existing data: add machine_name column if it doesn't exist
+	// (for backwards compatibility with existing databases)
+	migrateSchema := `
+	ALTER TABLE managed_session ADD COLUMN machine_name TEXT NOT NULL DEFAULT 'unknown';
+	`
+	s.db.Exec(migrateSchema) // Ignore error if column already exists
+	
+	return nil
 }
 
 // Close closes the database connection.
@@ -259,14 +272,15 @@ func (s *Store) SaveManagedSession(session *ManagedSession) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.Exec(`
-		INSERT INTO managed_session (session_id, directory, user_id, room_id, state, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO managed_session (session_id, directory, user_id, machine_name, room_id, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id) DO UPDATE SET
 			directory = excluded.directory,
 			user_id = excluded.user_id,
+			machine_name = excluded.machine_name,
 			room_id = excluded.room_id,
 			state = excluded.state
-	`, session.SessionID, session.Directory, session.UserID, session.RoomID, session.State, session.CreatedAt)
+	`, session.SessionID, session.Directory, session.UserID, session.MachineName, session.RoomID, session.State, session.CreatedAt)
 
 	return err
 }
@@ -276,10 +290,10 @@ func (s *Store) GetManagedSession(sessionID string) (*ManagedSession, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	row := s.db.QueryRow("SELECT session_id, directory, user_id, room_id, state, created_at FROM managed_session WHERE session_id = ?", sessionID)
+	row := s.db.QueryRow("SELECT session_id, directory, user_id, machine_name, room_id, state, created_at FROM managed_session WHERE session_id = ?", sessionID)
 
 	var ms ManagedSession
-	err := row.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.RoomID, &ms.State, &ms.CreatedAt)
+	err := row.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.MachineName, &ms.RoomID, &ms.State, &ms.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -294,7 +308,7 @@ func (s *Store) GetAllManagedSessions() ([]*ManagedSession, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.Query("SELECT session_id, directory, user_id, room_id, state, created_at FROM managed_session")
+	rows, err := s.db.Query("SELECT session_id, directory, user_id, machine_name, room_id, state, created_at FROM managed_session")
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +317,7 @@ func (s *Store) GetAllManagedSessions() ([]*ManagedSession, error) {
 	var sessions []*ManagedSession
 	for rows.Next() {
 		var ms ManagedSession
-		if err := rows.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.RoomID, &ms.State, &ms.CreatedAt); err != nil {
+		if err := rows.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.MachineName, &ms.RoomID, &ms.State, &ms.CreatedAt); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, &ms)

@@ -58,10 +58,11 @@ func (s State) String() string {
 
 // Session represents a running pi subprocess.
 type Session struct {
-	ID        string
-	Directory string
-	UserID    string
-	State     State
+	ID           string
+	Directory    string
+	UserID       string
+	MachineName  string
+	State        State
 
 	PiConfig config.SessionManagerConfig
 
@@ -83,7 +84,7 @@ type Session struct {
 }
 
 // newSession creates a new session.
-func newSession(directory, userID string, cfg config.SessionManagerConfig, logger zerolog.Logger) *Session {
+func newSession(directory, userID, machineName string, cfg config.SessionManagerConfig, logger zerolog.Logger) *Session {
 	absDir, _ := filepath.Abs(directory)
 	if absDir == "" {
 		absDir = directory
@@ -91,14 +92,15 @@ func newSession(directory, userID string, cfg config.SessionManagerConfig, logge
 
 	sessionID := uuid.New().String()
 	return &Session{
-		ID:        sessionID,
-		Directory: absDir,
-		UserID:    userID,
-		State:     StatePending,
-		PiConfig:  cfg,
-		CreatedAt: time.Now(),
-		LastActivity: time.Now(),
-		logger: logger.With().Str("session_id", sessionID).Str("directory", absDir).Logger(),
+		ID:           sessionID,
+		Directory:    absDir,
+		UserID:       userID,
+		MachineName:  machineName,
+		State:        StatePending,
+		PiConfig:     cfg,
+		CreatedAt:    time.Now(),
+		LastActivity:  time.Now(),
+		logger:       logger.With().Str("session_id", sessionID).Str("directory", absDir).Str("machine", machineName).Logger(),
 		pendingRequests: make(map[string]chan *RpcResponse),
 	}
 }

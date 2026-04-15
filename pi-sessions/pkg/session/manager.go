@@ -80,13 +80,14 @@ func (m *Manager) SetStore(store *store.Store) error {
 		// Restore session to memory with 'stopped' state so it will restart on next prompt
 		// This preserves the session ID mapping for the appservice
 		sess := &Session{
-			ID:        ms.SessionID,
-			Directory: ms.Directory,
-			UserID:    ms.UserID,
-			State:     StateStopped, // Will restart on next prompt
-			PiConfig:  m.config,
-			CreatedAt: time.Unix(ms.CreatedAt, 0),
-			logger:    m.logger.With().Str("session_id", ms.SessionID).Str("directory", ms.Directory).Logger(),
+			ID:          ms.SessionID,
+			Directory:   ms.Directory,
+			UserID:      ms.UserID,
+			MachineName: ms.MachineName,
+			State:       StateStopped, // Will restart on next prompt
+			PiConfig:    m.config,
+			CreatedAt:   time.Unix(ms.CreatedAt, 0),
+			logger:      m.logger.With().Str("session_id", ms.SessionID).Str("directory", ms.Directory).Str("machine", ms.MachineName).Logger(),
 		}
 		sess.pendingRequests = make(map[string]chan *RpcResponse)
 		
@@ -114,7 +115,8 @@ func (m *Manager) handleSessionEvent(s *Session, event *SessionEvent) {
 		Msg("handling session event")
 	
 	e := &Event{
-		SessionID: s.ID,
+		SessionID:   s.ID,
+		MachineName: s.MachineName,
 	}
 	
 	m.mu.RLock()
@@ -207,7 +209,7 @@ func NewManager(ctx context.Context, config config.SessionManagerConfig, logger 
 }
 
 // CreateSession creates a new session for the given directory.
-func (m *Manager) CreateSession(ctx context.Context, directory, userID string, broadcast func(*Event)) (*Session, error) {
+func (m *Manager) CreateSession(ctx context.Context, directory, userID, machineName string, broadcast func(*Event)) (*Session, error) {
 	absDir, err := filepath.Abs(directory)
 	if err != nil {
 		return nil, fmt.Errorf("invalid directory: %w", err)
@@ -239,10 +241,11 @@ func (m *Manager) CreateSession(ctx context.Context, directory, userID string, b
 	m.logger.Info().
 		Str("directory", absDir).
 		Str("user_id", userID).
+		Str("machine_name", machineName).
 		Msg("creating session")
 
 	// Create session
-	sess := newSession(absDir, userID, m.config, m.logger)
+	sess := newSession(absDir, userID, machineName, m.config, m.logger)
 
 	// Set up event handler to broadcast events
 	sess.SetEventHandler(func(s *Session, event *SessionEvent) {
@@ -257,12 +260,13 @@ func (m *Manager) CreateSession(ctx context.Context, directory, userID string, b
 	// Persist session to store
 	if m.store != nil {
 		ms := &store.ManagedSession{
-			SessionID: sess.ID,
-			Directory: sess.Directory,
-			UserID:    sess.UserID,
-			RoomID:    "", // Room ID set by appservice later
-			State:     sess.GetState().String(),
-			CreatedAt: sess.CreatedAt.Unix(),
+			SessionID:   sess.ID,
+			Directory:   sess.Directory,
+			UserID:      sess.UserID,
+			MachineName: sess.MachineName,
+			RoomID:      "", // Room ID set by appservice later
+			State:       sess.GetState().String(),
+			CreatedAt:   sess.CreatedAt.Unix(),
 		}
 		if err := m.store.SaveManagedSession(ms); err != nil {
 			m.logger.Warn().Err(err).Str("session_id", sess.ID).Msg("failed to persist session")

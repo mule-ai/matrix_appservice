@@ -45,11 +45,12 @@ type httpHandler struct {
 
 // Event represents a session event to be streamed.
 type Event struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Content   string `json:"content,omitempty"`
-	ToolName  string `json:"tool_name,omitempty"`
-	IsError   bool   `json:"is_error,omitempty"`
+	Type        string `json:"type"`
+	SessionID   string `json:"session_id"`
+	MachineName string `json:"machine_name"`
+	Content     string `json:"content,omitempty"`
+	ToolName    string `json:"tool_name,omitempty"`
+	IsError     bool   `json:"is_error,omitempty"`
 }
 
 // NewHTTPHandler creates a new HTTP handler.
@@ -132,10 +133,11 @@ func (h *httpHandler) handleListSessions(w http.ResponseWriter, r *http.Request)
 	sessionList := make([]map[string]interface{}, 0, len(sessions))
 	for _, s := range sessions {
 		sessionList = append(sessionList, map[string]interface{}{
-			"id":        s.ID,
-			"directory":  s.Directory,
-			"user_id":   s.UserID,
-			"state":     s.State.String(),
+			"id":           s.ID,
+			"directory":    s.Directory,
+			"user_id":      s.UserID,
+			"machine_name": s.MachineName,
+			"state":        s.State.String(),
 		})
 	}
 
@@ -148,8 +150,9 @@ func (h *httpHandler) handleListSessions(w http.ResponseWriter, r *http.Request)
 // handleCreateSession handles creating a new session.
 func (h *httpHandler) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Directory string `json:"directory"`
-		UserID   string `json:"user_id"`
+		Directory   string `json:"directory"`
+		UserID      string `json:"user_id"`
+		MachineName string `json:"machine_name"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -162,10 +165,16 @@ func (h *httpHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Use provided machine_name or default to config's machine_name
+	machineName := req.MachineName
+	if machineName == "" {
+		machineName = h.config.MachineName
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	sess, err := h.manager.CreateSession(ctx, req.Directory, req.UserID, h.broadcaster())
+	sess, err := h.manager.CreateSession(ctx, req.Directory, req.UserID, machineName, h.broadcaster())
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to create session: %v", err), http.StatusInternalServerError)
 		return
@@ -174,10 +183,11 @@ func (h *httpHandler) handleCreateSession(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":        sess.ID,
-		"directory":  sess.Directory,
-		"user_id":   sess.UserID,
-		"state":     sess.State.String(),
+		"id":           sess.ID,
+		"directory":    sess.Directory,
+		"user_id":      sess.UserID,
+		"machine_name": sess.MachineName,
+		"state":        sess.State.String(),
 	})
 }
 
@@ -191,10 +201,11 @@ func (h *httpHandler) handleGetSession(w http.ResponseWriter, r *http.Request, s
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id":        sess.ID,
-		"directory":  sess.Directory,
-		"user_id":   sess.UserID,
-		"state":     sess.State.String(),
+		"id":           sess.ID,
+		"directory":    sess.Directory,
+		"user_id":      sess.UserID,
+		"machine_name": sess.MachineName,
+		"state":        sess.State.String(),
 	})
 }
 

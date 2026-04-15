@@ -28,14 +28,15 @@ import (
 
 // Config represents the main configuration.
 type Config struct {
-	Homeserver       HomeserverConfig       `yaml:"homeserver"`
-	Appservice       AppserviceConfig       `yaml:"appservice"`
-	API              APIConfig              `yaml:"api"`
-	Bridge           BridgeConfig           `yaml:"bridge"`
-	SessionManager   SessionManagerConfig   `yaml:"session_manager"`
-	Pi               PiConfig              `yaml:"pi"`
-	Database         DatabaseConfig         `yaml:"database"`
-	Logging          LoggingConfig          `yaml:"logging"`
+	Homeserver       HomeserverConfig         `yaml:"homeserver"`
+	Appservice       AppserviceConfig         `yaml:"appservice"`
+	API              APIConfig                `yaml:"api"`
+	Bridge           BridgeConfig             `yaml:"bridge"`
+	SessionManager   SessionManagerConfig     `yaml:"session_manager"`
+	SessionManagers SessionManagersConfig     `yaml:"session_managers"` // Multiple managers for appservice
+	Pi               PiConfig                `yaml:"pi"`
+	Database         DatabaseConfig           `yaml:"database"`
+	Logging          LoggingConfig            `yaml:"logging"`
 }
 
 // HomeserverConfig contains the Matrix homeserver connection details.
@@ -99,6 +100,21 @@ type SessionManagerConfig struct {
 	
 	// Persistence
 	DataDir string `yaml:"data_dir"`
+	
+	// Identity (for server mode)
+	MachineName string `yaml:"machine_name"`
+}
+
+// SessionManagersConfig contains multiple session manager configurations (for appservice).
+type SessionManagersConfig struct {
+	Managers []ManagerEndpointConfig `yaml:"managers"`
+}
+
+// ManagerEndpointConfig contains configuration for a single session manager endpoint.
+type ManagerEndpointConfig struct {
+	Name   string `yaml:"name"`
+	URL    string `yaml:"url"`
+	APIKey string `yaml:"api_key"`
 }
 
 // PiConfig contains settings for pi executable.
@@ -195,6 +211,27 @@ func (c *Config) Normalize() error {
 		c.SessionManager.DataDir = "/var/lib/pi-session-manager/sessions"
 	}
 	c.SessionManager.APIKey = expandEnv(c.SessionManager.APIKey)
+	
+	// Set default machine name to hostname if not specified
+	if c.SessionManager.MachineName == "" {
+		c.SessionManager.MachineName = getHostname()
+	}
+	
+	// Backwards compatibility: if session_managers is not set but session_manager.url is,
+	// create a default manager entry
+	if len(c.SessionManagers.Managers) == 0 && c.SessionManager.URL != "" {
+		machineName := c.SessionManager.MachineName
+		if machineName == "" {
+			machineName = "default"
+		}
+		c.SessionManagers.Managers = []ManagerEndpointConfig{
+			{
+				Name:   machineName,
+				URL:    c.SessionManager.URL,
+				APIKey: c.SessionManager.APIKey,
+			},
+		}
+	}
 
 	// Set defaults for pi
 	if c.Pi.Path == "" {
@@ -241,6 +278,15 @@ func expandEnv(s string) string {
 		return os.Getenv(s[2 : len(s)-1])
 	}
 	return s
+}
+
+// getHostname returns the system hostname or "unknown" on error.
+func getHostname() string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return "unknown"
+	}
+	return hostname
 }
 
 func (c *BridgeConfig) SessionTimeoutDuration() time.Duration {

@@ -1,7 +1,7 @@
 # pi-matrix - Matrix Appservice for pi Sessions
 
 ## Version
-2.1.0
+3.0.0
 
 ## Status
 Active
@@ -16,6 +16,7 @@ Active
 
 - **Tool Call Visibility**: Users see when pi is running tools (bash, read, write, etc.) with timing information
 - **Multiple Sessions**: Support for multiple simultaneous sessions across different directories
+- **Multi-Machine Support**: Run session managers on different machines, control from single appservice
 - **Session Reset**: `/new` command to reset a session with clean context
 - **Continuous Conversation**: Same session maintains context across messages
 
@@ -33,27 +34,16 @@ The system uses a distributed architecture with two separate services:
 │  - Handles Matrix protocol (DMs, rooms, events)                            │
 │  - Receives DMs: /start, /list, /stop, /help                              │
 │  - Creates Matrix rooms for sessions                                       │
-│  - Routes messages to/from Session Manager                                 │
-│  - Receives events via SSE from Session Manager                            │
+│  - Routes messages to/from Session Managers (multiple)                     │
+│  - Receives events via SSE from all Session Managers                       │
 │                                                                            │
-└────────────────────────────┬──────────────────────────────────────────────┘
-                             │ HTTP + SSE
-                             ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                 pi-session-manager (Session Manager)                         │
-│                                                                            │
-│  - Runs locally (on same host as user)                                     │
-│  - Spawns `pi --mode rpc` subprocesses                                     │
-│  - Manages session lifecycle                                               │
-│  - Streams events to Appservice via SSE                                    │
-│  - Handles message routing to pi                                           │
-│                                                                            │
-│  ┌─────────────────────────────────────────────────────────────────────┐   │
-│  │  Session 1: /path/to/project-a  ──►  pi --mode rpc                 │   │
-│  │  Session 2: /path/to/project-b  ──►  pi --mode rpc                 │   │
-│  │  Session N: /path/to/project-n  ──►  pi --mode rpc                 │   │
-│  └─────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+└────────┬────────────────────────────────┬───────────────────────────────┬────┘
+         │ SSE                            │ SSE                           │ SSE
+         ▼                                ▼                               ▼
+┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+│ Session Manager  │         │ Session Manager  │         │ Session Manager  │
+│ (machine: desktop)│         │ (machine: laptop)│         │ (machine: server)│
+└─────────────────┘         └─────────────────┘         └─────────────────┘
 ```
 
 ### Why Two Services?
@@ -61,6 +51,15 @@ The system uses a distributed architecture with two separate services:
 - **Session Manager** runs locally because it spawns `pi` subprocesses that need access to the user's files, git repositories, and environment.
 - **Appservice** runs on the Matrix homeserver because it needs to communicate with the Matrix server directly with minimal latency.
 - Communication between them uses HTTP with SSE for event streaming.
+
+### Multi-Machine Support
+
+Multiple session manager instances can connect to a single appservice:
+
+- Each session manager identifies itself with a `machine_name`
+- Users specify the machine when starting a session: `/start <machine> <path>`
+- Sessions are distributed across machines based on user selection
+- Events from all managers are routed to the correct Matrix rooms
 
 ---
 
@@ -72,11 +71,13 @@ The system supports **multiple simultaneous sessions across different directorie
 2. Runs pi in its own subprocess
 3. Maintains independent conversation context
 4. Can be reset independently with `/new`
+5. Can run on any configured machine
 
 **Example setup:**
 ```
-Session 1: /data/jbutler/git/jbutlerdev  →  Room: "Pi Session: jbutlerdev"
-Session 2: /data/jbutler/git/mule-ai     →  Room: "Pi Session: mule-ai"
+Session 1: desktop:/data/jbutler/git/jbutlerdev  →  Room: "Pi: desktop: jbutlerdev"
+Session 2: laptop:/data/jbutler/git/mule-ai     →  Room: "Pi: laptop: mule-ai"
+Session 3: server:/opt/deployment                →  Room: "Pi: server: deployment"
 ```
 
 Users can switch between projects by joining different rooms.
@@ -112,14 +113,16 @@ This helps users:
 - Matrix appservice protocol
 - DM handling with commands
 - Room creation and management
-- Message routing to Session Manager
-- Receiving events via SSE
+- Message routing to Session Managers
+- Receiving events via SSE from all managers
+- Routing events to correct rooms based on session ID
 
 **Commands (via DM)**:
 | Command | Description |
 |---------|-------------|
-| `/start <path>` | Create new session in the specified directory |
-| `/list` | List active sessions |
+| `/start <machine> <path>` | Create new session on specified machine |
+| `/start <path>` | Create new session (uses first available machine) |
+| `/list` | List active sessions (shows machine, directory, user) |
 | `/stop` | Stop user's active session |
 | `/help` | Show help |
 
@@ -129,42 +132,24 @@ This helps users:
 | `/new` | Reset session with clean context |
 | `/help` | Show room commands |
 
-**API Endpoints (consumed by appservice)**:
-- `POST /sessions` - Create session
-- `DELETE /sessions/{id}` - Delete session
-- `POST /sessions/{id}/prompt` - Send prompt
-- `GET /sessions` - List sessions
-- `GET /sessions/{id}` - Get session info
-- `GET /events` - SSE event stream
-
 ### Session Manager (`pi-session-manager`)
 
-**Location**: Runs locally
+**Location**: Runs locally (one per machine)
 
 **Responsibilities**:
 - Spawn and manage pi subprocesses
 - Handle RPC communication with pi
 - Stream events back to Appservice
 - Session lifecycle (timeouts, cleanup)
+- Identify itself by machine name
 
-**API Endpoints (provided)**:
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /health | Health check |
-| GET | /sessions | List all sessions |
-| POST | /sessions | Create new session |
-| GET | /sessions/{id} | Get session info |
-| DELETE | /sessions/{id} | Delete session |
-| POST | /sessions/{id}/prompt | Send prompt to session |
-| GET | /events | SSE event stream |
-
-**SSE Events**:
-```json
-{"type": "typing_start", "session_id": "..."}
-{"type": "typing_stop", "session_id": "..."}
-{"type": "message", "session_id": "...", "content": "..."}
-{"type": "tool_start", "session_id": "...", "tool_name": "bash"}
-{"type": "tool_end", "session_id": "...", "tool_name": "bash", "is_error": false}
+**Configuration**:
+```yaml
+session_manager:
+  host: 0.0.0.0
+  port: 19081
+  machine_name: "desktop"  # Identifies this machine
+  pi_path: /usr/local/bin/pi
 ```
 
 ---
@@ -174,26 +159,25 @@ This helps users:
 ### 1. User Creates Session via DM
 
 ```
-User ──DM: "/start /home/user/projects/myapp"──► Appservice
-                                              │
-                                              ▼
+User ──DM: "/start desktop /home/user/projects/myapp"──► Appservice
+                                                    │
+                                                    ▼
                                     ┌──────────────────────┐
-                                    │ Appservice validates │
-                                    │ Creates session via  │
-                                    │ Session Manager API   │
+                                    │ Appservice routes to │
+                                    │ "desktop" manager    │
                                     └──────────────────────┘
-                                              │
-                                              ▼
+                                                    │
+                                                    ▼
                                     ┌──────────────────────┐
-                                    │ Session Manager      │
+                                    │ Desktop Session Mgr  │
                                     │ Spawns pi subprocess │
                                     └──────────────────────┘
-                                              │
-                                              ▼
+                                                    │
+                                                    ▼
                                     ┌──────────────────────┐
                                     │ Appservice creates   │
-                                    │ Matrix room, invites │
-                                    │ user                 │
+                                    │ Matrix room:         │
+                                    │ "Pi: desktop: myapp" │
                                     └──────────────────────┘
 ```
 
@@ -213,34 +197,6 @@ User ──Room Message──► Appservice ──HTTP POST──► Session Man
                                               │ Appservice   │
                                               │ sends to room│
                                               └──────────────┘
-```
-
-### 3. Tool Execution Visibility
-
-```
-User: "List all files"
-    → Room message sent
-
-pi: thinking... → typing_start event
-pi: 🔧 Running bash... → tool_start event (ls -la)
-pi: [tool executes]
-pi: ✅ bash completed → tool_end event
-pi: Here's the file list... → message event
-    → Sent to room
-```
-
-### 4. Session Reset with /new
-
-```
-User ──Room: "/new"──► Appservice
-                          │
-                          ▼
-                    Delete old session
-                    Create new session
-                    (same directory)
-                          │
-                          ▼
-                    "Session reset" message
 ```
 
 ---
@@ -269,12 +225,6 @@ SendPrompt → session.state == stopped → Start() → pi restarts → prompt s
 
 This allows sessions to be maintained across multiple conversations without keeping pi running continuously.
 
-### Session Context
-
-- **Conversation history** is maintained within a session across multiple messages
-- **`/new` command** clears context by creating a fresh session in the same directory
-- Sessions persist even when pi exits (pi restarts automatically on next prompt)
-
 ---
 
 ## Event Accumulation
@@ -295,6 +245,7 @@ Text responses are accumulated during streaming to avoid sending partial message
 session_manager:
   host: 0.0.0.0
   port: 19081
+  machine_name: "desktop"  # NEW: Identifies this machine
   api_key: ""
   pi_path: /root/.nvm/versions/node/v20.18.1/bin/pi
   agent_dir: ~/.pi/agent
@@ -316,9 +267,52 @@ appservice:
   as_token: "${APPSERVICE_AS_TOKEN}"
   hs_token: "${APPSERVICE_HS_TOKEN}"
 
-session_manager:
-  url: http://10.10.199.96:19081
-  api_key: ""
+# Multiple session managers (NEW)
+session_managers:
+  - name: "desktop"
+    url: http://192.168.1.10:19081
+    api_key: ""
+  - name: "laptop"
+    url: http://192.168.1.20:19081
+    api_key: ""
+  - name: "server"
+    url: http://server.example.com:19081
+    api_key: ""
+
+# For backwards compatibility, single manager still works:
+# session_manager:
+#   url: http://localhost:19081
+#   machine_name: "default"
+```
+
+---
+
+## API Changes
+
+### Session Creation Request (NEW)
+```json
+{
+    "directory": "/path/to/project",
+    "user_id": "@user:matrix.example.com",
+    "machine_name": "desktop"
+}
+```
+
+### Session Info Response (UPDATED)
+```json
+{
+    "id": "uuid",
+    "directory": "/path/to/project",
+    "user_id": "@user:matrix.example.com",
+    "machine_name": "desktop",
+    "state": "running"
+}
+```
+
+### SSE Events (UPDATED)
+```json
+{"type": "message", "session_id": "...", "machine_name": "desktop", "content": "..."}
+{"type": "tool_start", "session_id": "...", "machine_name": "desktop", "tool_name": "bash"}
 ```
 
 ---
@@ -327,7 +321,7 @@ session_manager:
 
 ### Systemd Services
 
-**Session Manager** (local):
+**Session Manager** (on each machine):
 ```bash
 systemctl start pi-session-manager
 systemctl stop pi-session-manager
@@ -339,16 +333,6 @@ systemctl restart pi-session-manager
 systemctl start pi-matrix
 systemctl stop pi-matrix
 systemctl restart pi-matrix
-```
-
-### Log Viewing
-
-```bash
-# Session manager logs
-journalctl -u pi-session-manager -f
-
-# Appservice logs
-journalctl -u pi-matrix -f
 ```
 
 ---
@@ -364,12 +348,13 @@ pi-sessions/
 │       └── main.go
 ├── pkg/
 │   ├── appservice/            # Appservice logic
-│   ├── bridge/                # Bridge logic
-│   ├── config/                # Configuration
+│   ├── config/                # Configuration (with multi-manager support)
 │   ├── matrix/                # Matrix client (rooms, typing, etc.)
-│   ├── session/               # Session management (manager, session, http_handler)
-│   └── sessionmanager/        # Client for appservice to talk to session manager
-├── systemd/                  # Systemd units and install scripts
+│   ├── session/               # Session management
+│   ├── sessionmanager/        # Multi-manager client
+│   └── store/                 # Persistence
+├── docs/
+│   └── MULTI_MANAGER_PLAN.md
 ├── config.yaml.example
 ├── SPEC.md
 └── README.md
@@ -383,6 +368,24 @@ pi-sessions/
 2. **Path Validation**: Appservice validates directory paths
 3. **Process Isolation**: Each pi runs in separate subprocess
 4. **Environment Variables**: Sensitive config via environment variables
+5. **Machine Authentication**: Appservice validates machine names against configured list
+
+---
+
+## Changelog
+
+### 3.0.0 - Multi-Machine Support
+- Added `machine_name` to session manager config
+- Appservice supports multiple session managers
+- New `/start <machine> <path>` command syntax
+- Room names include machine name
+- Events include `machine_name` field
+- Backwards compatible with single manager config
+
+### 2.1.0 - Previous
+- Markdown rendering improvements
+- UTF-8 corruption fix
+- Session reset command improvements
 
 ---
 
