@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -428,8 +430,7 @@ func ConvertMarkdownToHTML(content string) (string, string) {
 		bytes.Contains([]byte(content), []byte("`")) ||
 		bytes.Contains([]byte(content), []byte("**")) ||
 		bytes.Contains([]byte(content), []byte("__")) ||
-		bytes.Contains([]byte(content), []byte("##")) ||
-		bytes.Contains([]byte(content), []byte("```")) {
+		bytes.Contains([]byte(content), []byte("##")) {
 		hasMarkdown = true
 	}
 
@@ -447,7 +448,32 @@ func ConvertMarkdownToHTML(content string) (string, string) {
 	// Convert newlines to <br> for display
 	sanitized = string(bytes.ReplaceAll([]byte(sanitized), []byte("\n"), []byte("<br>")))
 
-	return content, string(sanitized)
+	// Create plain text version by stripping markdown markers
+	plain := stripMarkdown(content)
+
+	return plain, string(sanitized)
+}
+
+// stripMarkdown removes basic markdown formatting from text.
+func stripMarkdown(content string) string {
+	// Replace common markdown patterns
+	result := content
+
+	// Code blocks ```code```
+	codeBlockRegex := regexp.MustCompile("```[\\s\\S]*?```|`([^`]+)`")
+	result = codeBlockRegex.ReplaceAllString(result, "$1")
+
+	// Bold **text** or __text__
+	result = strings.ReplaceAll(result, "**", "")
+	result = strings.ReplaceAll(result, "__", "")
+
+	// Inline code `text`
+	result = strings.ReplaceAll(result, "`", "'")
+
+	// Headers ### text
+	result = strings.ReplaceAll(result, "## ", "")
+
+	return result
 }
 
 // SendFormattedMessage sends a formatted message to a room.
