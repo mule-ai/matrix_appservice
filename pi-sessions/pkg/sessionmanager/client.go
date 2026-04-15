@@ -177,7 +177,7 @@ func (c *Client) runEventStreamWithReconnect() {
 func (c *Client) readEvents(resp *http.Response) {
 	// SSE format: "data: {json}\n\n" where blank line ends an event
 	// JSON content may contain newlines, so we need to accumulate until blank line
-	var dataBuf string
+	var dataBuf []byte
 
 	buf := make([]byte, 4096)
 	for {
@@ -185,8 +185,8 @@ func (c *Client) readEvents(resp *http.Response) {
 		if n > 0 {
 			for i := 0; i < n; i++ {
 				if buf[i] == '\n' {
-					line := strings.TrimSpace(dataBuf)
-					dataBuf = ""
+					line := strings.TrimSpace(string(dataBuf))
+					dataBuf = dataBuf[:0]
 					
 					if line == "" {
 						// Blank line marks end of event
@@ -198,7 +198,7 @@ func (c *Client) readEvents(resp *http.Response) {
 						c.handleEventData(jsonData)
 					}
 				} else {
-					dataBuf += string(buf[i])
+					dataBuf = append(dataBuf, buf[i])
 				}
 			}
 		}
