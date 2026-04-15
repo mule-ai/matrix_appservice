@@ -432,6 +432,13 @@ func cleanupContent(s string) string {
 		{string(rune(0x201C)), "\""}, // left double quote
 		{string(rune(0x201D)), "\""}, // right double quote
 		{string(rune(0x2022)), "-"},   // bullet
+		{string(rune(0x2190)), "<-"},  // left arrow
+		{string(rune(0x2192)), "->"},  // right arrow
+		{string(rune(0x2194)), "<->"}, // left-right arrow
+		{string(rune(0x2611)), "[X]"}, // ballot box checked
+		{string(rune(0x2612)), "[ ]"}, // ballot box
+		{string(rune(0x2714)), "OK"},   // heavy check mark
+		{string(rune(0x2718)), "X"},   // heavy X
 	}
 
 	result := s
