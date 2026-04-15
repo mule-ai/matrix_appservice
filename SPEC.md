@@ -19,6 +19,7 @@ Active
 - **Multi-Machine Support**: Run session managers on different machines, control from single appservice
 - **Session Reset**: `/new` command to reset a session with clean context
 - **Continuous Conversation**: Same session maintains context across messages
+- **Steering**: Interrupt the agent mid-task with `/steer <message>` to redirect it
 
 ---
 
