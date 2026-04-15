@@ -411,14 +411,45 @@ func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 }
 
 // SendMessage sends a text message to a room.
-// If the content contains markdown formatting, it will be converted to HTML.
+// Content is sent as plain text.
 func (c *Client) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {
-	// Convert markdown to HTML for better Matrix rendering
-	plain, html := ConvertMarkdownToHTML(content)
-	if html != "" {
-		return c.SendFormattedMessage(ctx, roomID, plain, "org.matrix.custom.html", html)
+	// Clean up the content - remove problematic UTF-8 chars
+	clean := cleanupContent(content)
+	return c.SendFormattedMessage(ctx, roomID, clean, "", "")
+}
+
+// cleanupContent removes problematic characters from content.
+func cleanupContent(s string) string {
+	// Replace smart quotes and dashes with ASCII equivalents
+	replacements := []struct {
+		from string
+		to   string
+	}{
+		{string(rune(0x2013)), "-"},   // en dash
+		{string(rune(0x2014)), "-"},   // em dash
+		{string(rune(0x2018)), "'"},  // left single quote
+		{string(rune(0x2019)), "'"},  // right single quote
+		{string(rune(0x201C)), "\""}, // left double quote
+		{string(rune(0x201D)), "\""}, // right double quote
+		{string(rune(0x2022)), "-"},   // bullet
 	}
-	return c.SendFormattedMessage(ctx, roomID, content, "", "")
+
+	result := s
+	for _, r := range replacements {
+		result = strings.ReplaceAll(result, r.from, r.to)
+	}
+
+	// Remove box-drawing and other special chars
+	specialChars := []string{
+		"─", "│", "├", "┤", "┌", "┐", "└", "┘",
+		"═", "║", "╔", "╗", "╚", "╝", "╠", "╣",
+		"━", "┃", "┏", "┓", "┗", "┛", "┣", "┫",
+	}
+	for _, c := range specialChars {
+		result = strings.ReplaceAll(result, c, "")
+	}
+
+	return strings.TrimSpace(result)
 }
 
 // ConvertMarkdownToHTML converts markdown text to HTML.
