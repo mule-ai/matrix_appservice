@@ -339,6 +339,25 @@ func (m *Manager) SendPrompt(ctx context.Context, sessionID, message string) err
 	return sess.SendPrompt(ctx, message)
 }
 
+// SteerPrompt aborts the current task and sends a new prompt.
+// This allows users to interrupt the agent and redirect it.
+func (m *Manager) SteerPrompt(ctx context.Context, sessionID, message string) error {
+	sess, ok := m.GetSession(sessionID)
+	if !ok {
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Restart pi if stopped (pi exits after processing in RPC mode)
+	if sess.GetState() == StateStopped {
+		m.logger.Info().Str("session_id", sessionID).Msg("session stopped, restarting pi")
+		if err := sess.Start(ctx); err != nil {
+			return fmt.Errorf("failed to restart pi: %w", err)
+		}
+	}
+
+	return sess.SteerPrompt(ctx, message)
+}
+
 // ListSessions returns all sessions.
 func (m *Manager) ListSessions() []*Session {
 	m.mu.RLock()

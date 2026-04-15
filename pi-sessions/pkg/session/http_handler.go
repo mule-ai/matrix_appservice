@@ -222,7 +222,8 @@ func (h *httpHandler) handleDeleteSession(w http.ResponseWriter, r *http.Request
 // handleSendPrompt handles sending a prompt to a session.
 func (h *httpHandler) handleSendPrompt(w http.ResponseWriter, r *http.Request, sessionID string) {
 	var req struct {
-		Message string `json:"message"`
+		Message         string `json:"message"`
+		StreamingBehavior string `json:"streamingBehavior"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -238,7 +239,18 @@ func (h *httpHandler) handleSendPrompt(w http.ResponseWriter, r *http.Request, s
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	if err := h.manager.SendPrompt(ctx, sessionID, req.Message); err != nil {
+	var err error
+	
+	switch req.StreamingBehavior {
+	case "steer":
+		// Steer: interrupt current task and send new prompt
+		err = h.manager.SteerPrompt(ctx, sessionID, req.Message)
+	default:
+		// Normal prompt
+		err = h.manager.SendPrompt(ctx, sessionID, req.Message)
+	}
+
+	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to send prompt: %v", err), http.StatusInternalServerError)
 		return
 	}

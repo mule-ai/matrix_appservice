@@ -288,6 +288,36 @@ func (s *Session) SendPrompt(ctx context.Context, message string) error {
 	return nil
 }
 
+// SteerPrompt aborts the current task and sends a new prompt.
+// This allows users to interrupt the agent and redirect it.
+func (s *Session) SteerPrompt(ctx context.Context, message string) error {
+	if !s.IsRunning() {
+		return fmt.Errorf("session not running")
+	}
+
+	s.logger.Info().Msg("sending prompt with streamingBehavior=steer")
+	
+	// Send the prompt with streamingBehavior: steer
+	// pi will handle aborting the current task internally
+	req := RpcRequest{
+		ID:                uuid.New().String(),
+		Type:              "prompt",
+		Message:           message,
+		StreamingBehavior:  "steer",
+	}
+	
+	resp, err := s.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("prompt failed: %s", resp.Error)
+	}
+
+	return nil
+}
+
 // sendRequest sends an RPC request.
 func (s *Session) sendRequest(ctx context.Context, req RpcRequest) (*RpcResponse, error) {
 	respCh := make(chan *RpcResponse, 1)
@@ -475,9 +505,10 @@ func (s *Session) handleLine(line string) {
 
 // RpcRequest represents an RPC request.
 type RpcRequest struct {
-	ID      string `json:"id,omitempty"`
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"`
+	ID                string `json:"id,omitempty"`
+	Type              string `json:"type"`
+	Message           string `json:"message,omitempty"`
+	StreamingBehavior string `json:"streamingBehavior,omitempty"`
 }
 
 // RpcResponse represents an RPC response.

@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -448,8 +449,37 @@ func (c *Client) trySendPrompt(ctx context.Context, mgr *httpClient, sessionID, 
 	if resp.StatusCode == http.StatusNotFound {
 		return fmt.Errorf("session not found")
 	}
+	
+	// Read response body for error message
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+	
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned status %d", resp.StatusCode)
+		// Check if agent is busy and we should steer
+		if strings.Contains(bodyStr, "Agent is already processing") {
+			c.logger.Info().Str("session_id", sessionID).Msg("agent busy, attempting to steer")
+			
+			// Retry with streamingBehavior: steer
+			reqBodySteer := map[string]string{
+				"message":           message,
+				"streamingBehavior": "steer",
+			}
+			
+			resp2, err2 := mgr.doRequest(ctx, "POST", "/sessions/"+sessionID+"/prompt", reqBodySteer)
+			if err2 != nil {
+				return fmt.Errorf("steer failed: %w", err2)
+			}
+			defer resp2.Body.Close()
+			
+			if resp2.StatusCode != http.StatusOK {
+				body2, _ := io.ReadAll(resp2.Body)
+				return fmt.Errorf("steer failed: %s", string(body2))
+			}
+			
+			return nil
+		}
+		
+		return fmt.Errorf("server returned status %d: %s", resp.StatusCode, bodyStr)
 	}
 
 	return nil
