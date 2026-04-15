@@ -1,7 +1,7 @@
 # pi-matrix - Matrix Appservice for pi Sessions
 
 ## Version
-2.0.0
+2.1.0
 
 ## Status
 Active
@@ -12,6 +12,15 @@ Active
 
 **pi-matrix** is a distributed Matrix appservice that bridges [pi coding agent](https://github.com/mariozechner/pi-coding-agent) sessions to Matrix rooms. Users can create and interact with pi sessions directly from Matrix by sending DMs to the appservice bot.
 
+## Key Features
+
+- **Tool Call Visibility**: Users see when pi is running tools (bash, read, write, etc.) with timing information
+- **Multiple Sessions**: Support for multiple simultaneous sessions across different directories
+- **Session Reset**: `/new` command to reset a session with clean context
+- **Continuous Conversation**: Same session maintains context across messages
+
+---
+
 ## Architecture
 
 The system uses a distributed architecture with two separate services:
@@ -20,8 +29,8 @@ The system uses a distributed architecture with two separate services:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                    pi-matrix (Appservice)                                   │
 │                                                                            │
-│  - Lives centrally (single instance, runs on the matrix homeserver)        │
-│  - Handles Matrix protocol (DMs, rooms, events)                           │
+│  - Lives centrally (single instance, runs on the matrix homeserver)         │
+│  - Handles Matrix protocol (DMs, rooms, events)                            │
 │  - Receives DMs: /start, /list, /stop, /help                              │
 │  - Creates Matrix rooms for sessions                                       │
 │  - Routes messages to/from Session Manager                                 │
@@ -53,6 +62,46 @@ The system uses a distributed architecture with two separate services:
 - **Appservice** runs on the Matrix homeserver because it needs to communicate with the Matrix server directly with minimal latency.
 - Communication between them uses HTTP with SSE for event streaming.
 
+---
+
+## Multiple Sessions
+
+The system supports **multiple simultaneous sessions across different directories**. Each session:
+
+1. Has its own dedicated Matrix room
+2. Runs pi in its own subprocess
+3. Maintains independent conversation context
+4. Can be reset independently with `/new`
+
+**Example setup:**
+```
+Session 1: /data/jbutler/git/jbutlerdev  →  Room: "Pi Session: jbutlerdev"
+Session 2: /data/jbutler/git/mule-ai     →  Room: "Pi Session: mule-ai"
+```
+
+Users can switch between projects by joining different rooms.
+
+---
+
+## Tool Call Visibility
+
+When pi executes a tool (bash command, file read, etc.), users see it in the Matrix room:
+
+**Messages sent to room:**
+```
+🔧 Running bash...
+❌ bash failed   (on error)
+✅ bash completed  (on success, implicit - next message starts)
+```
+
+This helps users:
+- Understand what pi is doing during "thinking" periods
+- See the delay between sending a message and getting a response
+- Verify correctness of responses by seeing what commands were run
+- Debug issues by seeing tool execution results
+
+---
+
 ## Services
 
 ### Appservice (`pi-matrix`)
@@ -74,11 +123,18 @@ The system uses a distributed architecture with two separate services:
 | `/stop` | Stop user's active session |
 | `/help` | Show help |
 
+**Commands (via Room Message)**:
+| Command | Description |
+|---------|-------------|
+| `/new` | Reset session with clean context |
+| `/help` | Show room commands |
+
 **API Endpoints (consumed by appservice)**:
 - `POST /sessions` - Create session
 - `DELETE /sessions/{id}` - Delete session
 - `POST /sessions/{id}/prompt` - Send prompt
 - `GET /sessions` - List sessions
+- `GET /sessions/{id}` - Get session info
 - `GET /events` - SSE event stream
 
 ### Session Manager (`pi-session-manager`)
@@ -110,6 +166,8 @@ The system uses a distributed architecture with two separate services:
 {"type": "tool_start", "session_id": "...", "tool_name": "bash"}
 {"type": "tool_end", "session_id": "...", "tool_name": "bash", "is_error": false}
 ```
+
+---
 
 ## User Flow
 
@@ -157,6 +215,36 @@ User ──Room Message──► Appservice ──HTTP POST──► Session Man
                                               └──────────────┘
 ```
 
+### 3. Tool Execution Visibility
+
+```
+User: "List all files"
+    → Room message sent
+
+pi: thinking... → typing_start event
+pi: 🔧 Running bash... → tool_start event (ls -la)
+pi: [tool executes]
+pi: ✅ bash completed → tool_end event
+pi: Here's the file list... → message event
+    → Sent to room
+```
+
+### 4. Session Reset with /new
+
+```
+User ──Room: "/new"──► Appservice
+                          │
+                          ▼
+                    Delete old session
+                    Create new session
+                    (same directory)
+                          │
+                          ▼
+                    "Session reset" message
+```
+
+---
+
 ## Session Lifecycle
 
 Sessions are tracked persistently even when pi exits. This is because pi in RPC mode processes a single prompt and exits.
@@ -180,6 +268,24 @@ SendPrompt → session.state == stopped → Start() → pi restarts → prompt s
 ```
 
 This allows sessions to be maintained across multiple conversations without keeping pi running continuously.
+
+### Session Context
+
+- **Conversation history** is maintained within a session across multiple messages
+- **`/new` command** clears context by creating a fresh session in the same directory
+- Sessions persist even when pi exits (pi restarts automatically on next prompt)
+
+---
+
+## Event Accumulation
+
+Text responses are accumulated during streaming to avoid sending partial messages:
+
+1. `text_delta` events accumulate in memory
+2. When `text_end` is received, the complete text is sent as a single `message` event
+3. This prevents Matrix from showing incomplete/streaming responses
+
+---
 
 ## Configuration
 
@@ -215,6 +321,8 @@ session_manager:
   api_key: ""
 ```
 
+---
+
 ## Deployment
 
 ### Systemd Services
@@ -243,6 +351,8 @@ journalctl -u pi-session-manager -f
 journalctl -u pi-matrix -f
 ```
 
+---
+
 ## File Structure
 
 ```
@@ -265,12 +375,16 @@ pi-sessions/
 └── README.md
 ```
 
+---
+
 ## Security Considerations
 
 1. **API Key Authentication**: Session Manager supports optional API key
 2. **Path Validation**: Appservice validates directory paths
 3. **Process Isolation**: Each pi runs in separate subprocess
 4. **Environment Variables**: Sensitive config via environment variables
+
+---
 
 ## License
 

@@ -388,6 +388,33 @@ func (s *Session) handleLine(line string) {
 		return
 	}
 
+	// Try tool_execution_start event
+	var toolStart ToolExecutionStartEvent
+	if err := json.Unmarshal([]byte(line), &toolStart); err == nil && toolStart.Type == "tool_execution_start" {
+		event := SessionEvent{
+			Type:     "tool_start",
+			ToolName: toolStart.ToolName,
+		}
+		if s.onEvent != nil {
+			go s.onEvent(s, &event)
+		}
+		return
+	}
+
+	// Try tool_execution_end event
+	var toolEnd ToolExecutionEndEvent
+	if err := json.Unmarshal([]byte(line), &toolEnd); err == nil && toolEnd.Type == "tool_execution_end" {
+		event := SessionEvent{
+			Type:     "tool_end",
+			ToolName: toolEnd.ToolName,
+			IsError:  toolEnd.IsError,
+		}
+		if s.onEvent != nil {
+			go s.onEvent(s, &event)
+		}
+		return
+	}
+
 	// Try regular event
 	var event SessionEvent
 	if err := json.Unmarshal([]byte(line), &event); err == nil && event.Type != "" {
@@ -430,4 +457,23 @@ type MessageUpdateEvent struct {
 		Delta        string `json:"delta,omitempty"`
 		ContentIndex int    `json:"contentIndex,omitempty"`
 	} `json:"assistantMessageEvent,omitempty"`
+}
+
+// ToolExecutionStartEvent represents a tool_execution_start event from pi
+type ToolExecutionStartEvent struct {
+	Type      string `json:"type"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName  string `json:"toolName,omitempty"`
+	Args      map[string]interface{} `json:"args,omitempty"`
+}
+
+// ToolExecutionEndEvent represents a tool_execution_end event from pi
+type ToolExecutionEndEvent struct {
+	Type      string `json:"type"`
+	ToolCallID string `json:"toolCallId,omitempty"`
+	ToolName  string `json:"toolName,omitempty"`
+	Result    *struct {
+		Content []map[string]interface{} `json:"content,omitempty"`
+	} `json:"result,omitempty"`
+	IsError  bool `json:"isError,omitempty"`
 }

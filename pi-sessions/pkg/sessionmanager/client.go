@@ -315,6 +315,39 @@ func (c *Client) ListSessions(ctx context.Context) ([]SessionInfo, error) {
 	return result.Sessions, nil
 }
 
+// GetSession returns information about a specific session.
+func (c *Client) GetSession(ctx context.Context, sessionID string) (*SessionInfo, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/sessions/"+sessionID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
+	}
+
+	var session SessionInfo
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &session, nil
+}
+
 // GenerateRequestID generates a unique request ID.
 func GenerateRequestID() string {
 	return uuid.New().String()

@@ -98,8 +98,25 @@ func (as *AppService) onRoomMessage(roomID id.RoomID, sender id.UserID, content 
 		return
 	}
 
-	// Check if this is a command - handle it directly
+	// Check if this is a command - handle room-specific commands
 	if strings.HasPrefix(content, "/") {
+		parts := strings.SplitN(content, " ", 2)
+		cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+
+		// Handle /new command to reset session
+		if cmd == "new" {
+			as.handleNewCommand(roomID)
+			return
+		}
+
+		// Handle /help in room
+		if cmd == "help" {
+			ctx := context.Background()
+			as.mxClient.SendNotice(ctx, roomID, "Room commands:\n/new - Reset session with clean context\n/help - Show this help")
+			return
+		}
+
+		// Other commands go to general handler
 		as.handleCommand(sender, roomID, content)
 		return
 	}
@@ -308,6 +325,58 @@ func (as *AppService) handleHelpCommand(ctx context.Context, sender id.UserID, d
 To interact with a session, join its Matrix room. Messages will be forwarded to pi.`
 
 	as.mxClient.SendNotice(ctx, dmRoom, help)
+}
+
+// handleNewCommand handles the /new command in a session room to reset the session.
+func (as *AppService) handleNewCommand(roomID id.RoomID) {
+	ctx := context.Background()
+
+	// Find current session for this room
+	var oldSessionID string
+	for sessID, rID := range as.sessionRooms {
+		if rID == roomID {
+			oldSessionID = sessID
+			break
+		}
+	}
+
+	if oldSessionID == "" {
+		as.mxClient.SendNotice(ctx, roomID, "No session found for this room. Use /start <path> to create one.")
+		return
+	}
+
+	// Get current session info to find the directory
+	session, err := as.sessClient.GetSession(ctx, oldSessionID)
+	if err != nil || session == nil {
+		as.mxClient.SendNotice(ctx, roomID, "Error: Could not get session info. Use /stop and /start to create a new session.")
+		return
+	}
+
+	directory := session.Directory
+	userID := session.UserID
+
+	as.logger.Info().
+		Str("old_session_id", oldSessionID).
+		Str("directory", directory).
+		Msg("resetting session with /new")
+
+	// Delete old session
+	if err := as.sessClient.DeleteSession(ctx, oldSessionID); err != nil {
+		as.logger.Warn().Err(err).Str("session_id", oldSessionID).Msg("failed to delete old session")
+	}
+
+	// Create new session in same directory
+	newSessionID, err := as.sessClient.CreateSession(ctx, directory, userID)
+	if err != nil {
+		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: Failed to create new session: %v", err))
+		return
+	}
+
+	// Update session-room mapping
+	as.sessionRooms[oldSessionID] = "" // Clear old
+	as.sessionRooms[newSessionID] = roomID
+
+	as.mxClient.SendNotice(ctx, roomID, "Session reset. Previous context has been cleared. Start fresh!")
 }
 
 // onRoomJoin handles a user joining a room.
