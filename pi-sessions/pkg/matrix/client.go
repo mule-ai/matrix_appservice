@@ -437,8 +437,11 @@ func cleanupContent(s string) string {
 		{string(rune(0x2194)), "<->"}, // left-right arrow
 		{string(rune(0x2611)), "[X]"}, // ballot box checked
 		{string(rune(0x2612)), "[ ]"}, // ballot box
-		{string(rune(0x2714)), "OK"},   // heavy check mark
-		{string(rune(0x2718)), "X"},   // heavy X
+		{string(rune(0x2714)), "[OK]"},  // heavy check mark
+		{string(rune(0x2718)), "[X]"},  // heavy X
+		{string(rune(0x2705)), "[OK]"},  // white heavy check mark
+		{string(rune(0x274C)), "[X]"},  // cross mark
+		{string(rune(0x1F4DD)), "[note]"}, // memo emoji
 	}
 
 	result := s
