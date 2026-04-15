@@ -1,0 +1,62 @@
+# Pi Matrix Appservice Configuration
+# /etc/pi-matrix/config.yaml
+
+homeserver:
+  # Matrix homeserver address
+  address: http://localhost:8008
+  
+  # Matrix homeserver domain (for user IDs)
+  domain: localhost
+
+appservice:
+  # Unique ID for this appservice
+  id: pi-matrix
+  
+  # Localpart for the appservice bot (@pi-matrix:domain)
+  localpart: pi-matrix
+  
+  # URL where this appservice is reachable (from homeserver perspective)
+  url: http://localhost:8080
+  
+  # Path to registration file
+  registration_path: /etc/pi-matrix/registration.yaml
+  
+  # Auto-generate registration file
+  auto_generate_registration: true
+  
+  # Tokens (set via environment variables in systemd)
+  as_token: "${APPSERVICE_AS_TOKEN}"
+  hs_token: "${APPSERVICE_HS_TOKEN}"
+
+api:
+  # HTTP server binding
+  host: 0.0.0.0
+  port: 8080
+
+bridge:
+  # Room name prefix
+  room_name_prefix: "Pi Session"
+  
+  # Auto-create rooms
+  auto_create_rooms: true
+  
+  # Delete rooms when sessions exit
+  delete_rooms_on_exit: false
+  
+  # Session limits
+  max_sessions: 10
+  session_timeout: 3600
+
+session_manager:
+  # URL of the session manager
+  url: http://localhost:8081
+  
+  # API key (must match session-manager.yaml)
+  api_key: ""
+
+# Logging
+logging:
+  level: info
+  format: console
+  writers:
+    - stdout

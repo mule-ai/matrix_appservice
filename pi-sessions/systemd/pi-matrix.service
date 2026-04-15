@@ -1,0 +1,39 @@
+[Unit]
+Description=Pi Matrix Appservice - Matrix bridge for pi sessions
+Documentation=https://github.com/mule-ai/pi-matrix
+After=network.target pi-session-manager.service
+Wants=pi-session-manager.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/pi-matrix
+ExecStart=/opt/pi-matrix/pi-matrix -c /etc/pi-matrix/config.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Environment
+Environment=PI_AGENT_DIR=/var/lib/pi/agent
+Environment=APPSERVICE_AS_TOKEN=change_me
+Environment=APPSERVICE_HS_TOKEN=change_me
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pi /var/log/pi-matrix /tmp
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pi-matrix
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

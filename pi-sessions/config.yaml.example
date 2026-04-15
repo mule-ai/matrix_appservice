@@ -1,0 +1,68 @@
+# pi-matrix - A Matrix appservice for pi sessions via RPC mode
+# https://github.com/mule-ai/pi-matrix
+
+# Matrix homeserver configuration
+homeserver:
+    # Address of the Matrix homeserver
+    address: http://localhost:8008
+    
+    # The domain/hostname of the homeserver
+    domain: localhost
+
+# Appservice configuration
+appservice:
+    # Unique ID for this appservice
+    id: pi-matrix
+    
+    # The localpart for the appservice user (@pi-matrix:domain)
+    localpart: pi-matrix
+    
+    # The URL where this appservice listens for requests
+    url: http://localhost:29318
+    
+    # Path to the registration file
+    registration_path: registration.yaml
+    
+    # Auto-generate registration file if missing
+    auto_generate_registration: true
+    
+    # Appservice tokens (use environment variables for security)
+    as_token: "${APPSERVICE_AS_TOKEN}"
+    hs_token: "${APPSERVICE_HS_TOKEN}"
+
+# HTTP API server (optional, for debugging)
+api:
+    host: 0.0.0.0
+    port: 8080
+
+# Bridge settings
+bridge:
+    # Prefix for room names
+    room_name_prefix: "Pi Session"
+    
+    # Automatically create rooms when sessions start
+    auto_create_rooms: true
+    
+    # Delete rooms when sessions exit
+    delete_rooms_on_exit: false
+    
+    # Maximum number of concurrent sessions (0 = unlimited)
+    max_sessions: 10
+    
+    # Session timeout in seconds (0 = no timeout)
+    session_timeout: 3600
+
+# pi executable settings
+pi:
+    # Path to pi executable (or "pi" for PATH)
+    path: pi
+    
+    # Agent directory for auth, models, etc.
+    agent_dir: ~/.pi/agent
+
+# Logging configuration
+logging:
+    level: info
+    format: console
+    writers:
+        - stdout

@@ -1,0 +1,38 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Binary outputs
+pi-session-manager
+pi-matrix
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+pi-sessions/pi-session-manager
+pi-sessions/pi-matrix
+pi-sessions/*.tar.gz
+pi-sessions/pkg/bridge/*.go

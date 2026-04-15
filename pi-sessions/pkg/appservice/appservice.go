@@ -1,0 +1,397 @@
+// pi-matrix - A Matrix appservice for pi sessions.
+// Routes Matrix events to the Pi Session Manager and vice versa.
+// Copyright (C) 2026 Mule AI
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package appservice
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix/id"
+
+	"go.mau.fi/pi-matrix/pkg/config"
+	"go.mau.fi/pi-matrix/pkg/matrix"
+	"go.mau.fi/pi-matrix/pkg/sessionmanager"
+)
+
+// AppService handles Matrix events and routes them to/from the Session Manager.
+type AppService struct {
+	config   config.Config
+	mxClient *matrix.Client
+	sessClient *sessionmanager.Client
+
+	// Track DM rooms for users
+	dmRooms map[string]id.RoomID
+
+	// Track control rooms (first room user invites bot to)
+	controlRooms map[string]id.RoomID // userID -> roomID
+
+	// Track session rooms
+	sessionRooms map[string]id.RoomID
+
+	// Active sessions per user
+	userSessions map[string]string // userID -> sessionID
+
+	logger zerolog.Logger
+}
+
+// NewAppService creates a new appservice handler.
+func NewAppService(
+	cfg config.Config,
+	mxClient *matrix.Client,
+	sessClient *sessionmanager.Client,
+	logger zerolog.Logger,
+) *AppService {
+	as := &AppService{
+		config:       cfg,
+		mxClient:     mxClient,
+		sessClient:   sessClient,
+		dmRooms:      make(map[string]id.RoomID),
+		controlRooms: make(map[string]id.RoomID),
+		sessionRooms: make(map[string]id.RoomID),
+		userSessions: make(map[string]string),
+		logger:       logger,
+	}
+
+	// Register event handlers
+	mxClient.RegisterEventHandlers(
+		as.onRoomMessage,
+		as.onDMMessage,
+		as.onRoomJoin,
+		as.onRoomLeave,
+	)
+
+	// Register event listener from session manager
+	sessClient.OnSessionEvent(as.onSessionEvent)
+
+	return as
+}
+
+// onRoomMessage handles messages in session rooms.
+func (as *AppService) onRoomMessage(roomID id.RoomID, sender id.UserID, content string) {
+	as.logger.Info().
+		Str("room_id", string(roomID)).
+		Str("sender", string(sender)).
+		Str("content", content).
+		Msg("room message")
+
+	if sender == as.mxClient.GetBotUserID() {
+		return
+	}
+
+	// Check if this is a command - handle it directly
+	if strings.HasPrefix(content, "/") {
+		as.handleCommand(sender, roomID, content)
+		return
+	}
+
+	// Find session for this room
+	sessionID := ""
+	for sessID, rID := range as.sessionRooms {
+		if rID == roomID {
+			sessionID = sessID
+			break
+		}
+	}
+
+	// If no session found, ignore
+	if sessionID == "" {
+		as.logger.Warn().Str("room_id", string(roomID)).Msg("no session for room, use /start command first")
+		return
+	}
+
+	// Forward message to session manager
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := as.sessClient.SendPrompt(ctx, sessionID, content); err != nil {
+		as.logger.Error().Err(err).Str("session_id", sessionID).Msg("failed to send prompt")
+		as.mxClient.SendNotice(ctx, roomID, "Error: Failed to send message")
+	}
+}
+
+// onDMMessage handles direct messages to the bot.
+func (as *AppService) onDMMessage(sender id.UserID, content string) {
+	as.logger.Info().
+		Str("sender", string(sender)).
+		Str("content", content).
+		Msg("DM received")
+
+	// Get or create DM room for this user
+	dmRoom, ok := as.dmRooms[string(sender)]
+	if !ok {
+		ctx := context.Background()
+		room, err := as.mxClient.CreateDMRoom(ctx, sender)
+		if err != nil {
+			as.logger.Error().Err(err).Str("user_id", string(sender)).Msg("failed to create DM room")
+			return
+		}
+		dmRoom = room
+		as.dmRooms[string(sender)] = room
+	}
+
+	content = strings.TrimSpace(content)
+
+	if strings.HasPrefix(content, "/") {
+		as.handleCommand(sender, dmRoom, content)
+	} else {
+		as.handleStartCommand(sender, dmRoom, content)
+	}
+}
+
+// handleCommand handles DM commands.
+func (as *AppService) handleCommand(sender id.UserID, dmRoom id.RoomID, content string) {
+	parts := strings.SplitN(content, " ", 2)
+	cmd := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
+	var args string
+	if len(parts) > 1 {
+		args = strings.TrimSpace(parts[1])
+	}
+
+	ctx := context.Background()
+
+	switch cmd {
+	case "start", "new":
+		as.handleStartCommand(sender, dmRoom, args)
+
+	case "list", "sessions":
+		as.handleListCommand(ctx, sender, dmRoom)
+
+	case "stop":
+		as.handleStopCommand(ctx, sender, dmRoom, args)
+
+	case "help":
+		as.handleHelpCommand(ctx, sender, dmRoom)
+
+	default:
+		as.mxClient.SendNotice(ctx, dmRoom,
+			fmt.Sprintf("Unknown command: %s. Send /help for available commands.", cmd))
+	}
+}
+
+// handleStartCommand handles the /start command to create a new session.
+func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, path string) {
+	ctx := context.Background()
+
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "."
+	}
+
+	// Expand home directory
+	if strings.HasPrefix(path, "~/") {
+		home, _ := os.UserHomeDir()
+		path = filepath.Join(home, path[2:])
+	}
+
+	// Get absolute path
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: Invalid path: %v", err))
+		return
+	}
+
+	as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session in %s...", absPath))
+
+	// Create session via session manager
+	sessionID, err := as.sessClient.CreateSession(ctx, absPath, string(sender))
+	if err != nil {
+		as.logger.Error().Err(err).Str("path", absPath).Msg("failed to create session")
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	// Create session room and invite user
+	room, err := as.mxClient.CreateSessionRoom(ctx, absPath, sender)
+	if err != nil {
+		as.logger.Error().Err(err).Str("directory", absPath).Msg("failed to create session room")
+		as.mxClient.SendNotice(ctx, dmRoom, "Error: Failed to create session room")
+		as.sessClient.DeleteSession(context.Background(), sessionID)
+		return
+	}
+
+	// Track the session
+	as.sessionRooms[sessionID] = room.ID
+	as.userSessions[string(sender)] = sessionID
+
+	// Send messages
+	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started in %s", absPath))
+	as.mxClient.SendNotice(ctx, dmRoom,
+		fmt.Sprintf("Session started! Join the room: %s", room.ID))
+
+	as.logger.Info().
+		Str("session_id", sessionID).
+		Str("directory", absPath).
+		Str("room_id", string(dmRoom)).
+		Str("user_id", string(sender)).
+		Msg("new session created")
+}
+
+// handleListCommand handles the /list command.
+func (as *AppService) handleListCommand(ctx context.Context, sender id.UserID, dmRoom id.RoomID) {
+	sessions, err := as.sessClient.ListSessions(ctx)
+	if err != nil {
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
+		return
+	}
+
+	if len(sessions) == 0 {
+		as.mxClient.SendNotice(ctx, dmRoom, "No active sessions. Send /start <path> to create one.")
+		return
+	}
+
+	var lines []string
+	lines = append(lines, "Active sessions:")
+	for _, s := range sessions {
+		lines = append(lines, fmt.Sprintf("  • %s (user: %s)", s.Directory, s.UserID))
+	}
+
+	as.mxClient.SendNotice(ctx, dmRoom, strings.Join(lines, "\n"))
+}
+
+// handleStopCommand handles the /stop command.
+func (as *AppService) handleStopCommand(ctx context.Context, sender id.UserID, dmRoom id.RoomID, path string) {
+	sessionID, ok := as.userSessions[string(sender)]
+	if !ok {
+		as.mxClient.SendNotice(ctx, dmRoom, "No active session to stop. Use /start <path> to create one.")
+		return
+	}
+
+	if err := as.sessClient.DeleteSession(ctx, sessionID); err != nil {
+		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error stopping session: %v", err))
+		return
+	}
+
+	// Clean up tracking
+	if roomID, ok := as.sessionRooms[sessionID]; ok {
+		delete(as.sessionRooms, sessionID)
+		// Note: Room cleanup handled by appservice logic
+		as.mxClient.SendNotice(ctx, roomID, "Session has ended.")
+	}
+	delete(as.userSessions, string(sender))
+
+	as.mxClient.SendNotice(ctx, dmRoom, "Session stopped.")
+}
+
+// handleHelpCommand handles the /help command.
+func (as *AppService) handleHelpCommand(ctx context.Context, sender id.UserID, dmRoom id.RoomID) {
+	help := `Pi Matrix Bot Commands:
+
+/start <path> - Start a new pi session in the specified directory
+                (defaults to current directory if not specified)
+
+/list          - List all active sessions
+
+/stop          - Stop your active session
+
+/help          - Show this help message
+
+To interact with a session, join its Matrix room. Messages will be forwarded to pi.`
+
+	as.mxClient.SendNotice(ctx, dmRoom, help)
+}
+
+// onRoomJoin handles a user joining a room.
+func (as *AppService) onRoomJoin(roomID id.RoomID, userID id.UserID) {
+	as.logger.Info().
+		Str("room_id", string(roomID)).
+		Str("user_id", string(userID)).
+		Msg("user joined room")
+
+	// If this is the bot joining, set this as user's control room
+	if userID == as.mxClient.GetBotUserID() {
+		return
+	}
+
+	// Set this room as user's control room if not already set
+	if _, ok := as.controlRooms[string(userID)]; !ok {
+		as.controlRooms[string(userID)] = roomID
+		as.logger.Info().
+			Str("room_id", string(roomID)).
+			Str("user_id", string(userID)).
+			Msg("set as user control room")
+	}
+
+	// Find session for this room
+	sessionID := ""
+	for sessID, rID := range as.sessionRooms {
+		if rID == roomID {
+			sessionID = sessID
+			break
+		}
+	}
+
+	if sessionID == "" {
+		ctx := context.Background()
+		as.mxClient.SendNotice(ctx, roomID,
+			fmt.Sprintf("Welcome! Send /start <path> to create a session."))
+		return
+	}
+
+	ctx := context.Background()
+	as.mxClient.SendNotice(ctx, roomID,
+		fmt.Sprintf("Welcome! Send your message to interact with pi."))
+}
+
+// onRoomLeave handles a user leaving a room.
+func (as *AppService) onRoomLeave(roomID id.RoomID, userID id.UserID) {
+	as.logger.Info().
+		Str("room_id", string(roomID)).
+		Str("user_id", string(userID)).
+		Msg("user left room")
+}
+
+// onSessionEvent handles events from sessions (sent by session manager).
+func (as *AppService) onSessionEvent(event *sessionmanager.SessionEvent) {
+	as.logger.Debug().
+		Str("session_id", event.SessionID).
+		Str("event_type", event.Type).
+		Msg("received session event")
+
+	roomID, ok := as.sessionRooms[event.SessionID]
+	if !ok {
+		return
+	}
+
+	ctx := context.Background()
+
+	switch event.Type {
+	case "typing_start":
+		as.mxClient.SetTyping(ctx, roomID, true)
+
+	case "typing_stop":
+		as.mxClient.SetTyping(ctx, roomID, false)
+
+	case "message":
+		if event.Content != "" {
+			as.mxClient.SendMessage(ctx, roomID, event.Content)
+		}
+
+	case "tool_start":
+		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("🔧 Running %s...", event.ToolName))
+
+	case "tool_end":
+		if event.IsError {
+			as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("❌ %s failed", event.ToolName))
+		}
+	}
+}

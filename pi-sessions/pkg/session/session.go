@@ -1,0 +1,433 @@
+// pi-matrix - Session representing a pi subprocess.
+// Copyright (C) 2026 Mule AI
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+
+	"go.mau.fi/pi-matrix/pkg/config"
+)
+
+// State represents the session state.
+type State int
+
+const (
+	StatePending State = iota
+	StateStarting
+	StateRunning
+	StateStopping
+	StateStopped
+)
+
+func (s State) String() string {
+	switch s {
+	case StatePending: return "pending"
+	case StateStarting: return "starting"
+	case StateRunning: return "running"
+	case StateStopping: return "stopping"
+	case StateStopped: return "stopped"
+	default: return "unknown"
+	}
+}
+
+// Session represents a running pi subprocess.
+type Session struct {
+	ID        string
+	Directory string
+	UserID    string
+	State     State
+
+	PiConfig config.SessionManagerConfig
+
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  io.ReadCloser
+	cmdLock sync.Mutex
+
+	onEvent func(*Session, *SessionEvent)
+
+	pendingRequests map[string]chan *RpcResponse
+	requestMu       sync.RWMutex
+
+	CreatedAt    time.Time
+	LastActivity time.Time
+
+	logger zerolog.Logger
+	mu    sync.RWMutex
+}
+
+// newSession creates a new session.
+func newSession(directory, userID string, cfg config.SessionManagerConfig, logger zerolog.Logger) *Session {
+	absDir, _ := filepath.Abs(directory)
+	if absDir == "" {
+		absDir = directory
+	}
+
+	return &Session{
+		ID:        uuid.New().String(),
+		Directory: absDir,
+		UserID:    userID,
+		State:     StatePending,
+		PiConfig:  cfg,
+		CreatedAt: time.Now(),
+		LastActivity: time.Now(),
+		logger: logger.With().Str("session_id", uuid.New().String()).Str("directory", absDir).Logger(),
+		pendingRequests: make(map[string]chan *RpcResponse),
+	}
+}
+
+// SetEventHandler sets the event handler.
+func (s *Session) SetEventHandler(handler func(*Session, *SessionEvent)) {
+	s.onEvent = handler
+}
+
+// SetState updates the session state.
+func (s *Session) SetState(state State) {
+	s.mu.Lock()
+	s.State = state
+	s.LastActivity = time.Now()
+	s.mu.Unlock()
+
+	s.logger.Info().Str("state", state.String()).Msg("session state changed")
+}
+
+// GetState returns the current state.
+func (s *Session) GetState() State {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.State
+}
+
+// IsRunning returns true if the session is running.
+func (s *Session) IsRunning() bool {
+	return s.GetState() == StateRunning
+}
+
+// IsIdle returns true if the session has been idle.
+func (s *Session) IsIdle(duration time.Duration) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if duration == 0 {
+		return false
+	}
+	return time.Since(s.LastActivity) > duration
+}
+
+// UpdateActivity updates the last activity time.
+func (s *Session) UpdateActivity() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastActivity = time.Now()
+}
+
+// Start starts the pi subprocess.
+func (s *Session) Start(ctx context.Context) error {
+	s.SetState(StateStarting)
+
+	piPath, err := exec.LookPath(s.PiConfig.PiPath)
+	if err != nil {
+		if _, err := os.Stat(s.PiConfig.PiPath); err == nil {
+			piPath = s.PiConfig.PiPath
+		} else {
+			s.SetState(StateStopped)
+			return fmt.Errorf("pi not found: %s", s.PiConfig.PiPath)
+		}
+	}
+
+	s.logger.Info().Str("pi_path", piPath).Str("directory", s.Directory).Msg("starting pi")
+
+	s.cmdLock.Lock()
+	defer s.cmdLock.Unlock()
+
+	// Clean up any existing process
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.cmd.Process.Kill()
+		s.cmd.Wait()
+	}
+
+	// Use background context - we don't want the HTTP request context to kill the subprocess
+	s.cmd = exec.Command(piPath, "--mode", "rpc")
+	s.cmd.Dir = s.Directory
+
+	env := os.Environ()
+	// Add nvm node bin to PATH if using nvm-installed node
+	nvmNodeBin := "/root/.nvm/versions/node/v20.18.1/bin"
+	if _, err := os.Stat(nvmNodeBin); err == nil {
+		env = append(env, "PATH="+nvmNodeBin+":"+os.Getenv("PATH"))
+	}
+	if s.PiConfig.AgentDir != "" {
+		env = append(env, fmt.Sprintf("PI_AGENT_DIR=%s", s.PiConfig.AgentDir))
+	}
+	s.cmd.Env = env
+
+	s.stdin, err = s.cmd.StdinPipe()
+	if err != nil {
+		s.SetState(StateStopped)
+		return fmt.Errorf("failed to create stdin: %w", err)
+	}
+
+	s.stdout, err = s.cmd.StdoutPipe()
+	if err != nil {
+		s.stdin.Close()
+		s.SetState(StateStopped)
+		return fmt.Errorf("failed to create stdout: %w", err)
+	}
+
+	s.cmd.Stderr = os.Stderr
+
+	if err := s.cmd.Start(); err != nil {
+		s.stdin.Close()
+		s.stdout.Close()
+		s.SetState(StateStopped)
+		return fmt.Errorf("failed to start pi: %w", err)
+	}
+
+	s.logger.Info().Msg("starting stdout reader goroutine")
+	go s.readStdout()
+
+	s.SetState(StateRunning)
+	s.logger.Info().Str("pid", fmt.Sprintf("%d", s.cmd.Process.Pid)).Msg("pi started")
+
+	return nil
+}
+
+// Stop stops the pi subprocess.
+func (s *Session) Stop() error {
+	s.SetState(StateStopping)
+
+	s.cmdLock.Lock()
+	defer s.cmdLock.Unlock()
+
+	if s.cmd == nil || s.cmd.Process == nil {
+		s.SetState(StateStopped)
+		return nil
+	}
+
+	// Send abort
+	abortReq := RpcRequest{ID: uuid.New().String(), Type: "abort"}
+	data, _ := json.Marshal(abortReq)
+	fmt.Fprintf(s.stdin, "%s\n", string(data))
+
+	// Wait briefly
+	done := make(chan struct{})
+	go func() {
+		s.cmd.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		s.cmd.Process.Kill()
+	}
+
+	s.SetState(StateStopped)
+	return nil
+}
+
+// SendPrompt sends a prompt to pi.
+func (s *Session) SendPrompt(ctx context.Context, message string) error {
+	if !s.IsRunning() {
+		return fmt.Errorf("session not running")
+	}
+
+	req := RpcRequest{
+		ID:      uuid.New().String(),
+		Type:    "prompt",
+		Message: message,
+	}
+
+	resp, err := s.sendRequest(ctx, req)
+	if err != nil {
+		return err
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("prompt failed: %s", resp.Error)
+	}
+
+	return nil
+}
+
+// sendRequest sends an RPC request.
+func (s *Session) sendRequest(ctx context.Context, req RpcRequest) (*RpcResponse, error) {
+	respCh := make(chan *RpcResponse, 1)
+
+	s.requestMu.Lock()
+	s.pendingRequests[req.ID] = respCh
+	s.requestMu.Unlock()
+
+	s.cmdLock.Lock()
+	data, _ := json.Marshal(req)
+	_, err := fmt.Fprintf(s.stdin, "%s\n", string(data))
+	s.cmdLock.Unlock()
+
+	if err != nil {
+		s.requestMu.Lock()
+		delete(s.pendingRequests, req.ID)
+		s.requestMu.Unlock()
+		return nil, err
+	}
+
+	select {
+	case resp := <-respCh:
+		s.requestMu.Lock()
+		delete(s.pendingRequests, req.ID)
+		s.requestMu.Unlock()
+		return resp, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(60 * time.Second):
+		s.requestMu.Lock()
+		delete(s.pendingRequests, req.ID)
+		s.requestMu.Unlock()
+		return nil, fmt.Errorf("timeout")
+	}
+}
+
+// readStdout reads from pi's stdout.
+func (s *Session) readStdout() {
+	s.logger.Debug().Msg("starting stdout reader")
+
+	buf := make([]byte, 4096)
+	for {
+		n, err := s.stdout.Read(buf)
+		if err != nil {
+			s.logger.Info().Err(err).Msg("stdout closed")
+			s.SetState(StateStopped)
+			return
+		}
+
+		if n > 0 {
+			line := string(buf[:n])
+			s.logger.Debug().Str("line", line).Msg("received from pi")
+			lines := splitLines(line)
+			for _, l := range lines {
+				if l != "" {
+					s.handleLine(l)
+				}
+			}
+		}
+	}
+}
+
+// splitLines splits a string into lines.
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			line := s[start:i]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			lines = append(lines, line)
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+// handleLine handles a single line of RPC output.
+func (s *Session) handleLine(line string) {
+	s.UpdateActivity()
+
+	// Try response first
+	var resp RpcResponse
+	if err := json.Unmarshal([]byte(line), &resp); err == nil && resp.ID != "" {
+		s.requestMu.RLock()
+		ch, ok := s.pendingRequests[resp.ID]
+		s.requestMu.RUnlock()
+		if ok {
+			ch <- &resp
+			return
+		}
+	}
+
+	// Try message_update event (has nested assistantMessageEvent)
+	var msgUpdate MessageUpdateEvent
+	if err := json.Unmarshal([]byte(line), &msgUpdate); err == nil && msgUpdate.Type == "message_update" {
+		if msgUpdate.AssistantMessageEvent != nil {
+			// Extract the nested event type and emit it
+			nestedEvent := SessionEvent{
+				Type: msgUpdate.AssistantMessageEvent.Type,
+				Text: msgUpdate.AssistantMessageEvent.Delta,
+			}
+			if nestedEvent.Type != "" && s.onEvent != nil {
+				go s.onEvent(s, &nestedEvent)
+			}
+		}
+		return
+	}
+
+	// Try regular event
+	var event SessionEvent
+	if err := json.Unmarshal([]byte(line), &event); err == nil && event.Type != "" {
+		if s.onEvent != nil {
+			go s.onEvent(s, &event)
+		}
+	}
+}
+
+// RpcRequest represents an RPC request.
+type RpcRequest struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"`
+	Message string `json:"message,omitempty"`
+}
+
+// RpcResponse represents an RPC response.
+type RpcResponse struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type"`
+	Command string `json:"command,omitempty"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// SessionEvent represents a pi session event.
+type SessionEvent struct {
+	Type     string          `json:"type"`
+	Message  json.RawMessage `json:"message,omitempty"`
+	ToolName string          `json:"toolName,omitempty"`
+	IsError  bool            `json:"isError,omitempty"`
+	Text     string          `json:"text,omitempty"`
+}
+
+// MessageUpdateEvent represents a message_update event from pi (contains assistantMessageEvent)
+type MessageUpdateEvent struct {
+	Type               string `json:"type"`
+	AssistantMessageEvent *struct {
+		Type         string `json:"type"`
+		Delta        string `json:"delta,omitempty"`
+		ContentIndex int    `json:"contentIndex,omitempty"`
+	} `json:"assistantMessageEvent,omitempty"`
+}
