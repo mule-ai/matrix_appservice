@@ -548,7 +548,22 @@ func (as *AppService) onSessionEvent(event *sessionmanager.SessionEvent) {
 
 	roomID, ok := as.sessionRooms[event.SessionID]
 	if !ok {
-		return
+		// Session not in memory - check if it's in the database
+		if portal, err := as.store.GetPortal(event.SessionID); err == nil && portal != nil {
+			as.logger.Info().
+				Str("session_id", event.SessionID).
+				Str("room_id", string(portal.RoomID)).
+				Msg("restoring session room from database for incoming event")
+			as.sessionRooms[event.SessionID] = portal.RoomID
+			as.userSessions[portal.PrimaryUser] = event.SessionID
+			roomID = portal.RoomID
+			ok = true
+		} else {
+			as.logger.Debug().
+				Str("session_id", event.SessionID).
+				Msg("no room found for session event")
+			return
+		}
 	}
 
 	ctx := context.Background()
