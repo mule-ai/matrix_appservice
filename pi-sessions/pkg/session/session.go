@@ -316,47 +316,61 @@ func (s *Session) sendRequest(ctx context.Context, req RpcRequest) (*RpcResponse
 func (s *Session) readStdout() {
 	s.logger.Debug().Msg("starting stdout reader")
 
-	buf := make([]byte, 4096)
+	// Accumulator for incomplete lines
+	var acc string
+	buf := make([]byte, 8192)
 	for {
 		n, err := s.stdout.Read(buf)
 		if err != nil {
+			if acc != "" {
+				s.handleLine(acc)
+			}
 			s.logger.Info().Err(err).Msg("stdout closed")
 			s.SetState(StateStopped)
 			return
 		}
 
 		if n > 0 {
-			line := string(buf[:n])
-			s.logger.Debug().Str("line", line).Msg("received from pi")
-			lines := splitLines(line)
-			for _, l := range lines {
-				if l != "" {
-					s.handleLine(l)
+			acc += string(buf[:n])
+			
+			// Process complete lines (ending with \n)
+			for {
+				if len(acc) == 0 {
+					break
+				}
+				
+				// Find next newline
+				newlineIdx := -1
+				for i := 0; i < len(acc); i++ {
+					if acc[i] == '\n' {
+						newlineIdx = i
+						break
+					}
+				}
+				
+				if newlineIdx < 0 {
+					// No newline found, wait for more data
+					break
+				}
+				
+				// Extract complete line
+				line := acc[:newlineIdx]
+				acc = acc[newlineIdx+1:]
+				
+				// Remove trailing \r if present
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+				
+				if line != "" {
+					s.logger.Debug().Str("line", line).Msg("received from pi")
+					s.handleLine(line)
 				}
 			}
 		}
 	}
 }
 
-// splitLines splits a string into lines.
-func splitLines(s string) []string {
-	var lines []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			line := s[start:i]
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
-			}
-			lines = append(lines, line)
-			start = i + 1
-		}
-	}
-	if start < len(s) {
-		lines = append(lines, s[start:])
-	}
-	return lines
-}
 
 // handleLine handles a single line of RPC output.
 func (s *Session) handleLine(line string) {
