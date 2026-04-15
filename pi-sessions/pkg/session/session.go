@@ -403,6 +403,11 @@ func (s *Session) handleLine(line string) {
 	}
 	// If we get here, check if it's a text_end directly (not nested in message_update)
 	if strings.Contains(line, `"type":"text_end"`) {
+		// Try to parse and show error
+		var tmp map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &tmp); err != nil {
+			s.logger.Debug().Err(err).Str("line_preview", func() string { l := len(line); if l > 100 { return line[:100] }; return line }()).Msg("text_end JSON parse error")
+		}
 		s.logger.Debug().Str("line_preview", func() string { l := len(line); if l > 100 { return line[:100] }; return line }()).Msg("found text_end in line but not parsed as message_update")
 	}
 
