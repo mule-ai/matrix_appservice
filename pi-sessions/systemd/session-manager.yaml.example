@@ -22,6 +22,9 @@ session_manager:
   # Session timeout in seconds (0 = no timeout)
   session_timeout: 3600
 
+  # Data directory for session persistence (SQLite DB)
+  data_dir: /var/lib/pi-session-manager
+
 # Logging
 logging:
   level: info

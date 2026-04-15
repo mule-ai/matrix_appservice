@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -384,14 +385,24 @@ func (s *Session) handleLine(line string) {
 				text = msgUpdate.AssistantMessageEvent.Content
 			}
 			nestedEvent := SessionEvent{
-				Type: msgUpdate.AssistantMessageEvent.Type,
-				Text: text,
+				Type:        msgUpdate.AssistantMessageEvent.Type,
+				Text:        text,
+				ContentIndex: msgUpdate.AssistantMessageEvent.ContentIndex,
 			}
+			s.logger.Debug().
+				Str("event_type", nestedEvent.Type).
+				Int("content_index", nestedEvent.ContentIndex).
+				Str("text_preview", func() string { l := len(text); if l > 50 { return text[:50] + "..." }; return text }()).
+				Msg("emitting nested event from message_update")
 			if nestedEvent.Type != "" && s.onEvent != nil {
 				go s.onEvent(s, &nestedEvent)
 			}
 		}
 		return
+	}
+	// If we get here, check if it's a text_end directly (not nested in message_update)
+	if strings.Contains(line, `"type":"text_end"`) {
+		s.logger.Debug().Str("line_preview", func() string { l := len(line); if l > 100 { return line[:100] }; return line }()).Msg("found text_end in line but not parsed as message_update")
 	}
 
 	// Try tool_execution_start event
@@ -448,11 +459,12 @@ type RpcResponse struct {
 
 // SessionEvent represents a pi session event.
 type SessionEvent struct {
-	Type     string          `json:"type"`
-	Message  json.RawMessage `json:"message,omitempty"`
-	ToolName string          `json:"toolName,omitempty"`
-	IsError  bool            `json:"isError,omitempty"`
-	Text     string          `json:"text,omitempty"`
+	Type        string          `json:"type"`
+	Message     json.RawMessage `json:"message,omitempty"`
+	ToolName    string          `json:"toolName,omitempty"`
+	IsError     bool            `json:"isError,omitempty"`
+	Text        string          `json:"text,omitempty"`
+	ContentIndex int            `json:"contentIndex,omitempty"`
 }
 
 // MessageUpdateEvent represents a message_update event from pi (contains assistantMessageEvent)

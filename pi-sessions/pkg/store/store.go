@@ -42,6 +42,16 @@ type Portal struct {
 	CreatedAt  int64      `json:"created_at"`
 }
 
+// ManagedSession represents a session tracked by the session manager.
+type ManagedSession struct {
+	SessionID string `json:"session_id"`
+	Directory string `json:"directory"`
+	UserID    string `json:"user_id"`
+	RoomID    string `json:"room_id"`
+	State     string `json:"state"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 // Config stores global bridge configuration.
 type Config struct {
 	Key   string `json:"key"`
@@ -71,6 +81,25 @@ func NewStore(dbURL string, logger zerolog.Logger) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// InitManagerSchema initializes the schema for session manager (called by session manager, not appservice).
+func (s *Store) InitManagerSchema() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS managed_session (
+		session_id TEXT PRIMARY KEY,
+		directory TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		room_id TEXT NOT NULL,
+		state TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+	
+	CREATE INDEX IF NOT EXISTS idx_managed_session_user ON managed_session(user_id);
+	`
+	
+	_, err := s.db.Exec(schema)
+	return err
 }
 
 // Close closes the database connection.
@@ -222,4 +251,71 @@ func (s *Store) GetAllPortals() ([]*Portal, error) {
 		portals = append(portals, &p)
 	}
 	return portals, rows.Err()
+}
+
+// SaveManagedSession saves or updates a managed session.
+func (s *Store) SaveManagedSession(session *ManagedSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		INSERT INTO managed_session (session_id, directory, user_id, room_id, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			directory = excluded.directory,
+			user_id = excluded.user_id,
+			room_id = excluded.room_id,
+			state = excluded.state
+	`, session.SessionID, session.Directory, session.UserID, session.RoomID, session.State, session.CreatedAt)
+
+	return err
+}
+
+// GetManagedSession gets a managed session by session ID.
+func (s *Store) GetManagedSession(sessionID string) (*ManagedSession, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow("SELECT session_id, directory, user_id, room_id, state, created_at FROM managed_session WHERE session_id = ?", sessionID)
+
+	var ms ManagedSession
+	err := row.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.RoomID, &ms.State, &ms.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ms, nil
+}
+
+// GetAllManagedSessions returns all managed sessions.
+func (s *Store) GetAllManagedSessions() ([]*ManagedSession, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.Query("SELECT session_id, directory, user_id, room_id, state, created_at FROM managed_session")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []*ManagedSession
+	for rows.Next() {
+		var ms ManagedSession
+		if err := rows.Scan(&ms.SessionID, &ms.Directory, &ms.UserID, &ms.RoomID, &ms.State, &ms.CreatedAt); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, &ms)
+	}
+	return sessions, rows.Err()
+}
+
+// DeleteManagedSession deletes a managed session.
+func (s *Store) DeleteManagedSession(sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec("DELETE FROM managed_session WHERE session_id = ?", sessionID)
+	return err
 }

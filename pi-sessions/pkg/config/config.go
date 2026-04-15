@@ -96,6 +96,9 @@ type SessionManagerConfig struct {
 	// Limits
 	MaxSessions    int `yaml:"max_sessions"`
 	SessionTimeout int `yaml:"session_timeout"`
+	
+	// Persistence
+	DataDir string `yaml:"data_dir"`
 }
 
 // PiConfig contains settings for pi executable.
@@ -187,6 +190,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.SessionManager.MaxSessions == 0 {
 		c.SessionManager.MaxSessions = 10
+	}
+	if c.SessionManager.DataDir == "" {
+		c.SessionManager.DataDir = "/var/lib/pi-session-manager/sessions"
 	}
 	c.SessionManager.APIKey = expandEnv(c.SessionManager.APIKey)
 

@@ -28,11 +28,12 @@ import (
 	"github.com/rs/zerolog"
 
 	"go.mau.fi/pi-matrix/pkg/config"
+	"go.mau.fi/pi-matrix/pkg/store" 
 )
 
 // Manager handles all pi sessions.
 type Manager struct {
-	accumulatedText map[string]string // sessionID -> accumulated text
+	accumulatedText map[string]map[int]string // sessionID -> contentIndex -> accumulated text
 	sessions map[string]*Session
 	mu       sync.RWMutex
 
@@ -44,11 +45,57 @@ type Manager struct {
 
 	// Broadcast function for session events
 	broadcast func(*Event)
+
+	// Persistence store
+	store *store.Store
 }
 
 // SetBroadcaster sets the broadcast function for session events.
 func (m *Manager) SetBroadcaster(broadcast func(*Event)) {
 	m.broadcast = broadcast
+}
+
+// SetStore sets the persistence store and loads existing sessions.
+func (m *Manager) SetStore(store *store.Store) error {
+	m.store = store
+	
+	// Initialize the manager schema
+	if err := store.InitManagerSchema(); err != nil {
+		return fmt.Errorf("failed to init manager schema: %w", err)
+	}
+	
+	// Load existing sessions from DB
+	sessions, err := store.GetAllManagedSessions()
+	if err != nil {
+		return fmt.Errorf("failed to load sessions: %w", err)
+	}
+	
+	for _, ms := range sessions {
+		m.logger.Info().
+			Str("session_id", ms.SessionID).
+			Str("directory", ms.Directory).
+			Str("state", ms.State).
+			Msg("restoring session from store")
+		
+		// Restore session to memory with 'stopped' state so it will restart on next prompt
+		// This preserves the session ID mapping for the appservice
+		sess := &Session{
+			ID:        ms.SessionID,
+			Directory: ms.Directory,
+			UserID:    ms.UserID,
+			State:     StateStopped, // Will restart on next prompt
+			PiConfig:  m.config,
+			CreatedAt: time.Unix(ms.CreatedAt, 0),
+			logger:    m.logger.With().Str("session_id", ms.SessionID).Str("directory", ms.Directory).Logger(),
+		}
+		sess.pendingRequests = make(map[string]chan *RpcResponse)
+		
+		m.mu.Lock()
+		m.sessions[ms.SessionID] = sess
+		m.mu.Unlock()
+	}
+	
+	return nil
 }
 
 // NewManager creates a new session manager.
@@ -57,7 +104,7 @@ func NewManager(ctx context.Context, config config.SessionManagerConfig, logger 
 
 	return &Manager{
 		sessions:        make(map[string]*Session),
-		accumulatedText: make(map[string]string),
+		accumulatedText: make(map[string]map[int]string),
 		config:          config,
 		logger:          logger,
 		ctx:             ctx,
@@ -128,20 +175,38 @@ func (m *Manager) CreateSession(ctx context.Context, directory, userID string, b
 		case "text_delta":
 			// Accumulate text for later emission
 			m.mu.Lock()
-			m.accumulatedText[s.ID] += event.Text
+			if m.accumulatedText[s.ID] == nil {
+				m.accumulatedText[s.ID] = make(map[int]string)
+				m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Msg("initialized accumulator for contentIndex")
+			}
+			m.accumulatedText[s.ID][event.ContentIndex] += event.Text
+			m.logger.Debug().Str("session_id", s.ID).Int("content_index", event.ContentIndex).Int("accumulated_len", len(m.accumulatedText[s.ID][event.ContentIndex])).Msg("text_delta accumulated")
 			m.mu.Unlock()
 		case "text_end":
 			// Emit accumulated text as a message
 			m.mu.Lock()
-			text := m.accumulatedText[s.ID]
-			delete(m.accumulatedText, s.ID)
+			text := ""
+			if m.accumulatedText[s.ID] != nil {
+				text = m.accumulatedText[s.ID][event.ContentIndex]
+				delete(m.accumulatedText[s.ID], event.ContentIndex)
+			}
 			m.mu.Unlock()
+			m.logger.Debug().
+				Str("session_id", s.ID).
+				Int("content_index", event.ContentIndex).
+				Str("accumulated_text", text).
+				Msg("text_end received")
 			if text != "" {
 				e.Type = "message"
 				e.Content = text
 				if broadcast != nil {
 					broadcast(e)
 				}
+			} else {
+				m.logger.Warn().
+					Str("session_id", s.ID).
+					Int("content_index", event.ContentIndex).
+					Msg("text_end received but no accumulated text!")
 			}
 		case "tool_start":
 			e.Type = "tool_start"
@@ -164,11 +229,29 @@ func (m *Manager) CreateSession(ctx context.Context, directory, userID string, b
 	m.sessions[sess.ID] = sess
 	m.mu.Unlock()
 
+	// Persist session to store
+	if m.store != nil {
+		ms := &store.ManagedSession{
+			SessionID: sess.ID,
+			Directory: sess.Directory,
+			UserID:    sess.UserID,
+			RoomID:    "", // Room ID set by appservice later
+			State:     sess.GetState().String(),
+			CreatedAt: sess.CreatedAt.Unix(),
+		}
+		if err := m.store.SaveManagedSession(ms); err != nil {
+			m.logger.Warn().Err(err).Str("session_id", sess.ID).Msg("failed to persist session")
+		}
+	}
+
 	// Start pi subprocess
 	if err := sess.Start(ctx); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, sess.ID)
 		m.mu.Unlock()
+		if m.store != nil {
+			m.store.DeleteManagedSession(sess.ID)
+		}
 		return nil, fmt.Errorf("failed to start pi: %w", err)
 	}
 
@@ -195,6 +278,13 @@ func (m *Manager) DeleteSession(id string) error {
 
 	if !ok {
 		return fmt.Errorf("session not found: %s", id)
+	}
+
+	// Remove from store
+	if m.store != nil {
+		if err := m.store.DeleteManagedSession(id); err != nil {
+			m.logger.Warn().Err(err).Str("session_id", id).Msg("failed to delete session from store")
+		}
 	}
 
 	m.logger.Info().Str("session_id", id).Msg("deleting session")
