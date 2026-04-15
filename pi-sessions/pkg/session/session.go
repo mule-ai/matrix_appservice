@@ -378,9 +378,14 @@ func (s *Session) handleLine(line string) {
 	if err := json.Unmarshal([]byte(line), &msgUpdate); err == nil && msgUpdate.Type == "message_update" {
 		if msgUpdate.AssistantMessageEvent != nil {
 			// Extract the nested event type and emit it
+			// Use Delta for text_delta, Content for text_end
+			text := msgUpdate.AssistantMessageEvent.Delta
+			if text == "" {
+				text = msgUpdate.AssistantMessageEvent.Content
+			}
 			nestedEvent := SessionEvent{
 				Type: msgUpdate.AssistantMessageEvent.Type,
-				Text: msgUpdate.AssistantMessageEvent.Delta,
+				Text: text,
 			}
 			if nestedEvent.Type != "" && s.onEvent != nil {
 				go s.onEvent(s, &nestedEvent)
@@ -456,6 +461,7 @@ type MessageUpdateEvent struct {
 	AssistantMessageEvent *struct {
 		Type         string `json:"type"`
 		Delta        string `json:"delta,omitempty"`
+		Content      string `json:"content,omitempty"`
 		ContentIndex int    `json:"contentIndex,omitempty"`
 	} `json:"assistantMessageEvent,omitempty"`
 }
