@@ -473,7 +473,31 @@ func stripMarkdown(content string) string {
 	// Headers ### text
 	result = strings.ReplaceAll(result, "## ", "")
 
+	// Remove box-drawing and special UTF-8 characters that may not render well
+	result = removeSpecialChars(result)
+
 	return result
+}
+
+// removeSpecialChars removes problematic UTF-8 characters.
+func removeSpecialChars(s string) string {
+	// Common box-drawing characters and other special chars that don't render well
+	specialChars := []string{
+		"─", "│", "├", "┤", "┌", "┐", "└", "┘", "│",
+		"═", "║", "╔", "╗", "╚", "╝", "╠", "╣",
+		"━", "┃", "┏", "┓", "┗", "┛", "┣", "┫",
+		"•", "→", "←", "↑", "↓", "⇒", "⇐", "⇔",
+		"🎯", "✅", "❌", "🔧", // Emoji that may cause issues
+	}
+	result := s
+	for _, c := range specialChars {
+		result = strings.ReplaceAll(result, c, "")
+	}
+	// Replace multiple spaces with single space
+	for strings.Contains(result, "  ") {
+		result = strings.ReplaceAll(result, "  ", " ")
+	}
+	return strings.TrimSpace(result)
 }
 
 // SendFormattedMessage sends a formatted message to a room.
