@@ -122,12 +122,14 @@ func (m *Manager) handleSessionEvent(s *Session, event *SessionEvent) {
 	m.mu.RUnlock()
 	
 	switch event.Type {
-	case "agent_start":
+	case "agent_start", "turn_start", "message_start":
+		// These events indicate the agent is about to respond
 		e.Type = "typing_start"
 		if broadcast != nil {
 			broadcast(e)
 		}
-	case "agent_end":
+	case "agent_end", "message_end", "turn_end":
+		// These events indicate the agent has finished responding
 		e.Type = "typing_stop"
 		if broadcast != nil {
 			broadcast(e)
