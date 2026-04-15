@@ -175,8 +175,8 @@ func (c *Client) runEventStreamWithReconnect() {
 
 // readEvents reads SSE events from the response.
 func (c *Client) readEvents(resp *http.Response) {
-	// Simple line-based reading for SSE
-	// Format: "data: {json}\n\n"
+	// SSE format: "data: {json}\n\n" where blank line ends an event
+	// JSON content may contain newlines, so we need to accumulate until blank line
 	var dataBuf string
 
 	buf := make([]byte, 4096)
@@ -186,11 +186,17 @@ func (c *Client) readEvents(resp *http.Response) {
 			for i := 0; i < n; i++ {
 				if buf[i] == '\n' {
 					line := strings.TrimSpace(dataBuf)
+					dataBuf = ""
+					
+					if line == "" {
+						// Blank line marks end of event
+						continue
+					}
+					
 					if strings.HasPrefix(line, "data: ") {
 						jsonData := strings.TrimPrefix(line, "data: ")
 						c.handleEventData(jsonData)
 					}
-					dataBuf = ""
 				} else {
 					dataBuf += string(buf[i])
 				}
