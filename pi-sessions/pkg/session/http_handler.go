@@ -283,7 +283,10 @@ func (h *httpHandler) handleEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
+			// Write raw bytes to ensure UTF-8 encoding is preserved
+			w.Write([]byte("data: "))
+			w.Write(data)
+			w.Write([]byte("\n\n"))
 			flusher.Flush()
 		case <-ticker.C:
 			// Send keepalive

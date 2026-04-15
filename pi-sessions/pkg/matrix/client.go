@@ -413,8 +413,13 @@ func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 // SendMessage sends a text message to a room.
 // Content is sent as plain text.
 func (c *Client) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {
+	// Log raw bytes for debugging
+	c.logger.Debug().Str("content", content).Msg("SendMessage raw content")
+	
 	// Clean up the content - remove problematic UTF-8 chars
 	clean := cleanupContent(content)
+	c.logger.Debug().Str("clean", clean).Msg("SendMessage cleaned content")
+	
 	return c.SendFormattedMessage(ctx, roomID, clean, "", "")
 }
 
