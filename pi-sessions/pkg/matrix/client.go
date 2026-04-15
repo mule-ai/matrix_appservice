@@ -28,7 +28,8 @@ import (
 	"time"
 
 	"github.com/gomarkdown/markdown"
-	"github.com/microcosm-cc/bluemonday"
+	"github.com/gomarkdown/markdown/html"
+	"github.com/gomarkdown/markdown/parser"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
@@ -485,20 +486,22 @@ func ConvertMarkdownToHTML(content string) (string, string) {
 		return content, ""
 	}
 
-	// Convert markdown to HTML
-	html := markdown.ToHTML([]byte(content), nil, nil)
+	// Use gomarkdown with proper parser and renderer like matrix microservice
+	extensions := parser.CommonExtensions | parser.AutoHeadingIDs | parser.NoEmptyLineBeforeBlock
+	p := parser.NewWithExtensions(extensions)
+	doc := p.Parse([]byte(content))
 
-	// Sanitize HTML to prevent XSS (bluemonday)
-	policy := bluemonday.UGCPolicy()
-	sanitized := policy.Sanitize(string(html))
+	// Create HTML renderer
+	htmlFlags := html.CommonFlags | html.HrefTargetBlank
+	opts := html.RendererOptions{Flags: htmlFlags}
+	renderer := html.NewRenderer(opts)
 
-	// Convert newlines to <br> for display
-	sanitized = string(bytes.ReplaceAll([]byte(sanitized), []byte("\n"), []byte("<br>")))
+	htmlContent := string(markdown.Render(doc, renderer))
 
 	// Create plain text version by stripping markdown markers
 	plain := stripMarkdown(content)
 
-	return plain, string(sanitized)
+	return plain, htmlContent
 }
 
 // stripMarkdown removes basic markdown formatting from text.
