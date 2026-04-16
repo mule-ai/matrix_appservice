@@ -50,7 +50,7 @@ bridge:
     max_sessions: 10
     
     # Session timeout in seconds (0 = no timeout)
-    session_timeout: 3600
+    session_timeout: 0
 
 # Session Managers (appservice connects to these)
 # Multiple managers allow distributing sessions across machines

@@ -33,7 +33,7 @@ bridge:
   max_sessions: 10
   
   # Session timeout in seconds (0 = no timeout)
-  session_timeout: 3600
+  session_timeout: 0
 
 session_manager:
   # Network settings
@@ -54,7 +54,7 @@ session_manager:
   max_sessions: 10
   
   # Session timeout in seconds (0 = no timeout)
-  session_timeout: 3600
+  session_timeout: 0
 
   # Data directory for session persistence (SQLite DB)
   data_dir: /var/lib/pi-session-manager

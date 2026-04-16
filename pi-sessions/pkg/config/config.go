@@ -350,7 +350,7 @@ bridge:
     auto_create_rooms: true
     delete_rooms_on_exit: false
     max_sessions: 10
-    session_timeout: 3600
+    session_timeout: 0
 
 session_manager:
     # Server settings
@@ -367,7 +367,7 @@ session_manager:
     
     # Limits
     max_sessions: 10
-    session_timeout: 3600
+    session_timeout: 0
 
 pi:
     path: pi
