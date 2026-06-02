@@ -3,9 +3,9 @@
 .env.local
 .env.*.local
 
-# Binary outputs
-pi-session-manager
-pi-matrix
+# Binary outputs (paths under pi-sessions/, not the cmd/ sources)
+# Don't blanket-match 'pi-matrix' as a substring -- it also
+# matches pi-sessions/cmd/pi-matrix/main.go and excludes the source.
 
 # Go
 *.exe

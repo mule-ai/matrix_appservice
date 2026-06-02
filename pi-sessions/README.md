@@ -1,18 +1,28 @@
-# Pi Matrix - Matrix Appservice for pi Sessions
+# Pi Matrix - Matrix Appservice for forge
 
-A distributed Matrix appservice that bridges pi coding agent sessions to Matrix rooms. Users can create and interact with pi sessions directly from Matrix.
+A Matrix appservice that bridges [forge](https://github.com/jbutlerdev/forge)
+durable-agent sessions to Matrix rooms. Users can create and interact with
+agent sessions directly from Matrix.
 
 ## Architecture
 
 ```
-┌─────────────────────────┐         ┌─────────────────────────┐
-│   pi-matrix (Appservice)│◄───────►│ pi-session-manager       │
-│                         │ HTTP/SSE │                         │
-│ - Matrix protocol       │         │ - Spawns pi --mode rpc  │
-│ - DMs, rooms, events   │         │ - Manages sessions      │
-│ - Routes messages      │         │ - Streams events        │
-└─────────────────────────┘         └─────────────────────────┘
+┌──────────────────────────┐         ┌──────────────────────────┐
+│   pi-matrix (Appservice) │◄───────►│   forge-api (Rust)        │
+│                          │  HTTP   │                          │
+│ - Matrix protocol        │         │ - Spawns pi per session  │
+│ - DMs, rooms, events     │         │ - Persists message log   │
+│ - Polls forge for events │         │ - Runs tools via ext     │
+└──────────────────────────┘         └──────────┬───────────────┘
+                                                │ stdin/stdout
+                                                ▼
+                                    ┌────────────────────────┐
+                                    │  pi + forge-tools ext  │
+                                    └────────────────────────┘
 ```
+
+The appservice is a pure client of forge. forge owns the pi subprocesses,
+the message log, and the tool audit trail.
 
 ## Services
 
@@ -20,46 +30,51 @@ A distributed Matrix appservice that bridges pi coding agent sessions to Matrix 
 - Handles Matrix protocol (DMs, rooms, events)
 - Receives commands via DM: `/start`, `/list`, `/stop`, `/help`
 - Creates and manages Matrix rooms for sessions
-- Lives centrally (single instance)
+- Polls forge `GET /messages?session_id=...` once per second per active
+  session; translates new rows into Matrix events
+- Lives centrally (single instance, runs on the Matrix homeserver)
 
-### pi-session-manager
-- Spawns and manages `pi --mode rpc` subprocesses
-- Handles session lifecycle
-- Streams events back to appservice via SSE
-- Can be distributed/scaled (horizontally scalable)
+### forge (Rust)
+- Spawns and manages one long-lived pi subprocess per session
+- Persists every user/assistant/tool-call/tool-result row to PostgreSQL
+- Runs the four tools (`bash`, `read`, `write`, `edit`) via the
+  `forge-tools` extension
+- Exposes a REST API the appservice consumes
 
 ## Quick Start
 
 ### Build
 
 ```bash
-go build -o pi-session-manager ./cmd/pi-session-manager
 go build -o pi-matrix ./cmd/pi-matrix
 ```
 
-### Run Without systemd
+The `pi-session-manager` binary is no longer needed for normal operation
+and is kept in the tree only for reference.
+
+### Run
 
 ```bash
-# Terminal 1 - Start session manager
-./pi-session-manager -c config.yaml
-
-# Terminal 2 - Start appservice  
 ./pi-matrix -c config.yaml
 ```
+
+The first run exports a sample `config.yaml` to the path you pass (or to
+`config.yaml` in the cwd). Edit the `forge:` block to point at your
+local forge instance, then re-run.
 
 ### Install with systemd
 
 ```bash
-cd systemd
-chmod +x install.sh
-sudo ./install.sh
-sudo systemctl start pi-session-manager
-sudo systemctl start pi-matrix
+sudo cp pi-matrix /opt/pi-matrix/pi-matrix
+sudo cp config.yaml.example /etc/pi-matrix/config.yaml
+$EDITOR /etc/pi-matrix/config.yaml
+sudo systemctl restart pi-matrix
 ```
 
 ## Configuration
 
-### Example config.yaml for appservice
+The full example is at `config.yaml.example`. The two blocks the
+operator must set are `forge:` and `appservice:`:
 
 ```yaml
 homeserver:
@@ -69,82 +84,90 @@ homeserver:
 appservice:
   id: pi-matrix
   localpart: pi-matrix
-  url: http://localhost:8080
+  url: http://localhost:29318
   as_token: "${APPSERVICE_AS_TOKEN}"
   hs_token: "${APPSERVICE_HS_TOKEN}"
 
-session_manager:
-  url: http://localhost:8081
-  api_key: "your-api-key"
-
-bridge:
-  room_name_prefix: "Pi Session"
-  max_sessions: 10
+forge:
+  url: http://localhost:8080
+  api_key: "sk_forge_..."
+  default_profile:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    system_prompt: "You are a helpful coding assistant."
+    tools: [bash, read, write, edit]
 ```
 
-## Commands (via DM to @pi-matrix)
+`forge.api_key` is sent as `X-API-Key` on every request to forge.
+
+## Commands
+
+### DM Commands (to `@pi-matrix:your.domain`)
 
 | Command | Description |
 |---------|-------------|
-| `/start <path>` | Start a new session in the specified directory |
+| `/start <path>` | Start a new session in the given directory |
 | `/list` | List all active sessions |
-| `/stop` | Stop your active session |
-| `/help` | Show help message |
+| `/stop` | Stop your active session(s) |
+| `/help` | Show help |
 
-## API Endpoints (Session Manager)
+### Room Commands (inside a session room)
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /health | Health check |
-| GET | /sessions | List all sessions |
-| POST | /sessions | Create new session |
-| GET | /sessions/{id} | Get session info |
-| DELETE | /sessions/{id} | Delete session |
-| POST | /sessions/{id}/prompt | Send prompt |
-| GET | /events | SSE event stream |
+| Command | Description |
+|---------|-------------|
+| `/new` | Reset the session with a fresh context |
+| `/steer <msg>` | Send a steering message into the running session |
+| `/help` | Show room commands |
 
 ## Testing
 
 ```bash
-# Run all tests
-go test ./... -v
+# All tests
+GOCACHE=/data/.gocache GOMODCACHE=/data/.gomodcache TMPDIR=/data/.tmp \
+  go test ./... -v
 
-# Run specific package tests
-go test ./pkg/session/... -v
+# Just the forge + appservice suites (the new bits)
+GOCACHE=/data/.gocache GOMODCACHE=/data/.gomodcache TMPDIR=/data/.tmp \
+  go test ./pkg/forge/... ./pkg/appservice/... -v
 ```
+
+> The repo's root filesystem is usually full. Set `GOCACHE`,
+> `GOMODCACHE`, and `TMPDIR` to paths under `/data` to avoid disk-quota
+> build errors.
 
 ## Project Structure
 
 ```
 pi-sessions/
 ├── cmd/
-│   ├── pi-matrix/              # Appservice
-│   └── pi-session-manager/     # Session manager
+│   └── pi-matrix/              # Appservice (the one binary we deploy)
 ├── pkg/
-│   ├── appservice/            # Appservice logic
-│   ├── config/                # Configuration
-│   ├── matrix/                # Matrix client
-│   ├── session/               # Session management
-│   └── sessionmanager/        # Appservice's session manager client
-├── systemd/                  # Systemd units and install scripts
+│   ├── appservice/             # Matrix <-> forge event translation
+│   ├── config/                 # YAML config loader
+│   ├── forge/                  # forge REST client + event poller
+│   ├── matrix/                 # Matrix protocol client (mautrix)
+│   ├── session/                # (legacy pi-session-manager, not used)
+│   └── store/                  # SQLite portal + forge profile cache
 ├── config.yaml.example
-├── SPEC.md                   # Architecture specification
+├── SPEC.md                     # Architecture specification
 └── README.md
 ```
 
 ## Development
 
 ```bash
-# Build both binaries
-go build -o pi-session-manager ./cmd/pi-session-manager
+# Build the appservice
 go build -o pi-matrix ./cmd/pi-matrix
 
-# Run tests
-go test ./... -v
+# Run the appservice in dev mode
+./pi-matrix -c config.yaml
 
-# Run with verbose output
-RUST_LOG=debug ./pi-session-manager -c config.yaml
+# Run with debug logging
+RUST_LOG=debug ./pi-matrix -c config.yaml
 ```
+
+(The `RUST_LOG` env var name is a holdover from the v3 architecture; the
+Go appservice reads `logging.level` from the YAML.)
 
 ## License
 

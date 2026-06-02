@@ -1,11 +1,15 @@
-# pi-matrix - A Matrix appservice for pi sessions via RPC mode
-# https://github.com/mule-ai/pi-matrix
+# pi-matrix - A Matrix appservice that talks to the forge REST API.
+#
+# The matrix appservice no longer runs its own session manager. It
+# forwards /start, /stop, room messages, and event delivery to forge
+# over HTTP, and uses forge's message log as the source of truth for
+# agent output.
 
 # Matrix homeserver configuration
 homeserver:
     # Address of the Matrix homeserver
     address: http://localhost:8008
-    
+
     # The domain/hostname of the homeserver
     domain: localhost
 
@@ -13,71 +17,94 @@ homeserver:
 appservice:
     # Unique ID for this appservice
     id: pi-matrix
-    
+
     # The localpart for the appservice user (@pi-matrix:domain)
     localpart: pi-matrix
-    
+
     # The URL where this appservice listens for requests
     url: http://localhost:29318
-    
+
     # Path to the registration file
     registration_path: registration.yaml
-    
+
     # Auto-generate registration file if missing
     auto_generate_registration: true
-    
+
     # Appservice tokens (use environment variables for security)
     as_token: "${APPSERVICE_AS_TOKEN}"
     hs_token: "${APPSERVICE_HS_TOKEN}"
 
-# HTTP API server (optional, for debugging)
+# HTTP API server (optional, for debugging and the /health endpoint)
 api:
     host: 0.0.0.0
     port: 8080
 
 # Bridge settings
 bridge:
-    # Prefix for room names (machine name will be appended)
+    # Prefix for session room names
     room_name_prefix: "Pi"
-    
+
     # Automatically create rooms when sessions start
     auto_create_rooms: true
-    
+
     # Delete rooms when sessions exit
     delete_rooms_on_exit: false
-    
+
     # Maximum number of concurrent sessions (0 = unlimited)
     max_sessions: 10
-    
+
     # Session timeout in seconds (0 = no timeout)
     session_timeout: 0
 
-# Session Managers (appservice connects to these)
-# Multiple managers allow distributing sessions across machines
-session_managers:
-  managers:
-    - name: "desktop"
-      url: http://192.168.1.10:19081
-      api_key: ""
-    - name: "laptop"
-      url: http://192.168.1.20:19081
-      api_key: ""
-    - name: "server"
-      url: http://server.example.com:19081
-      api_key: ""
+# Forge is the durable backend that owns the agent sessions. The
+# appservice talks to it over REST; forge handles spawning pi,
+# running tools, and persisting the message log.
+forge:
+    # URL of the local forge API
+    url: http://localhost:8080
 
-# For backwards compatibility with single manager:
-# session_manager:
-#   url: http://localhost:19081
-#   machine_name: "default"
+    # API key sent as X-API-Key on every request (use env var in
+    # production). Empty is allowed for unsecured dev instances.
+    api_key: ""
 
-# pi executable settings
-pi:
-    # Path to pi executable (or "pi" for PATH)
-    path: pi
-    
-    # Agent directory for auth, models, etc.
-    agent_dir: ~/.pi/agent
+    # Reconnect backoff parameters for the SSE stream. The
+    # consumer reconnects with exponential backoff on
+    # transient errors; these set the min and max of the range.
+    reconnect_min_ms: 500
+    reconnect_max_ms: 30000
+
+    # Idle window after which a typing_stop is emitted. The agent
+    # is assumed to be done with a turn when no new rows have
+    # arrived for this long.
+    typing_quiet_ms: 3000
+
+    # Template for new forge profiles. The matrix appservice
+    # mints one profile per working directory on first /start;
+    # this template is the source of provider, model, system
+    # prompt, and tools.
+    default_profile:
+        # Provider name (anthropic, openai, proxy-anthropic, ...)
+        provider: anthropic
+
+        # Model id
+        model: claude-sonnet-4-20250514
+
+        # Optional: base URL override (for proxies)
+        base_url: ""
+
+        # Optional: API key (defaults to global env var on the
+        # forge side if empty)
+        api_key: ""
+
+        # System prompt to embed in every session
+        system_prompt: "You are a helpful coding assistant."
+
+        # Tool whitelist (forge registers these on the extension)
+        tools:
+            - bash
+            - read
+            - write
+            - edit
 
 # Logging configuration
 logging:

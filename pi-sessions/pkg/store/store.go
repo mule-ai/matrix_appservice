@@ -53,6 +53,17 @@ type ManagedSession struct {
 	CreatedAt   int64  `json:"created_at"`
 }
 
+// ForgeProfile caches the mapping from (matrix user, working dir)
+// to a forge profile id. The matrix appservice mints one profile
+// per pair so each new `/start <dir>` can spin up a session
+// against a profile that already has the right working dir.
+type ForgeProfile struct {
+	UserID     string `json:"user_id"`
+	WorkingDir string `json:"working_dir"`
+	ProfileID  string `json:"profile_id"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
 // Config stores global bridge configuration.
 type Config struct {
 	Key   string `json:"key"`
@@ -130,13 +141,26 @@ func (s *Store) initSchema() error {
 		primary_user TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	);
-	
+
 	CREATE TABLE IF NOT EXISTS config (
 		key TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);
-	
+
+	-- Maps (matrix user_id, working_dir) -> forge profile_id.
+	-- We mint a forge profile per (user, dir) so each new /start
+	-- can spin up a session against a profile that already has the
+	-- right working dir bound.
+	CREATE TABLE IF NOT EXISTS forge_profile (
+		user_id     TEXT NOT NULL,
+		working_dir TEXT NOT NULL,
+		profile_id  TEXT NOT NULL,
+		created_at  INTEGER NOT NULL,
+		PRIMARY KEY (user_id, working_dir)
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_portal_room_id ON portal(room_id);
+	CREATE INDEX IF NOT EXISTS idx_forge_profile_user ON forge_profile(user_id);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -264,6 +288,57 @@ func (s *Store) GetAllPortals() ([]*Portal, error) {
 		portals = append(portals, &p)
 	}
 	return portals, rows.Err()
+}
+
+// GetForgeProfile returns the cached forge profile id for a
+// (matrix user, working dir) pair, or (nil, nil) if not set.
+func (s *Store) GetForgeProfile(userID, workingDir string) (*ForgeProfile, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	row := s.db.QueryRow(
+		"SELECT user_id, working_dir, profile_id, created_at FROM forge_profile WHERE user_id = ? AND working_dir = ?",
+		userID, workingDir,
+	)
+	var p ForgeProfile
+	err := row.Scan(&p.UserID, &p.WorkingDir, &p.ProfileID, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// SaveForgeProfile records the (matrix user, working dir) -> forge
+// profile id mapping. Idempotent: re-saving the same key just
+// overwrites the row.
+func (s *Store) SaveForgeProfile(p *ForgeProfile) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(`
+		INSERT INTO forge_profile (user_id, working_dir, profile_id, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id, working_dir) DO UPDATE SET
+			profile_id = excluded.profile_id
+	`, p.UserID, p.WorkingDir, p.ProfileID, p.CreatedAt)
+	return err
+}
+
+// DeleteForgeProfile removes a cached forge profile mapping. Used
+// when a matrix user asks the appservice to forget a particular
+// (user, dir) binding.
+func (s *Store) DeleteForgeProfile(userID, workingDir string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.Exec(
+		"DELETE FROM forge_profile WHERE user_id = ? AND working_dir = ?",
+		userID, workingDir,
+	)
+	return err
 }
 
 // SaveManagedSession saves or updates a managed session.

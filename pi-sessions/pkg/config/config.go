@@ -34,6 +34,7 @@ type Config struct {
 	Bridge           BridgeConfig             `yaml:"bridge"`
 	SessionManager   SessionManagerConfig     `yaml:"session_manager"`
 	SessionManagers SessionManagersConfig     `yaml:"session_managers"` // Multiple managers for appservice
+	Forge            ForgeConfig              `yaml:"forge"`
 	Pi               PiConfig                `yaml:"pi"`
 	Database         DatabaseConfig           `yaml:"database"`
 	Logging          LoggingConfig            `yaml:"logging"`
@@ -115,6 +116,76 @@ type ManagerEndpointConfig struct {
 	Name   string `yaml:"name"`
 	URL    string `yaml:"url"`
 	APIKey string `yaml:"api_key"`
+}
+
+// ForgeConfig configures the connection to the forge REST API. The
+// matrix appservice no longer runs its own session manager; sessions
+// live in forge instead.
+type ForgeConfig struct {
+	// URL of the forge API (e.g. http://localhost:8080).
+	URL string `yaml:"url"`
+
+	// APIKey is sent as X-API-Key on every request. If empty, no
+	// auth header is sent (only useful for unsecured dev instances).
+	APIKey string `yaml:"api_key"`
+
+	// ReconnectMinMs is the minimum backoff between SSE
+	// reconnects when the stream fails. Default: 500.
+	ReconnectMinMs int `yaml:"reconnect_min_ms"`
+
+	// ReconnectMaxMs is the maximum backoff between SSE
+	// reconnects. Default: 30000.
+	ReconnectMaxMs int `yaml:"reconnect_max_ms"`
+
+	// TypingQuietMs is the idle window after which a `typing_stop`
+	// event is emitted if no new rows have arrived. Default: 3000.
+	TypingQuietMs int `yaml:"typing_quiet_ms"`
+
+	// DefaultProfile is the template the appservice uses when it
+	// has to create a new forge profile for a (matrix user, working
+	// dir) pair that hasn't been seen before. The forge profile is
+	// the only place the working dir lives, so a new dir requires
+	// a new profile.
+	DefaultProfile ForgeDefaultProfile `yaml:"default_profile"`
+}
+
+// ForgeDefaultProfile is the template used to mint new forge
+// profiles for matrix users. See ForgeConfig.DefaultProfile.
+type ForgeDefaultProfile struct {
+	Name         string   `yaml:"name"`
+	Provider     string   `yaml:"provider"`
+	Model        string   `yaml:"model"`
+	BaseURL      string   `yaml:"base_url"`
+	APIKey       string   `yaml:"api_key"`
+	SystemPrompt string   `yaml:"system_prompt"`
+	Tools        []string `yaml:"tools"`
+}
+
+// ReconnectMin returns the configured minimum SSE backoff,
+// falling back to 500ms if not set.
+func (c *ForgeConfig) ReconnectMin() time.Duration {
+	if c.ReconnectMinMs <= 0 {
+		return 500 * time.Millisecond
+	}
+	return time.Duration(c.ReconnectMinMs) * time.Millisecond
+}
+
+// ReconnectMax returns the configured maximum SSE backoff,
+// falling back to 30s if not set.
+func (c *ForgeConfig) ReconnectMax() time.Duration {
+	if c.ReconnectMaxMs <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.ReconnectMaxMs) * time.Millisecond
+}
+
+// TypingQuiet returns the configured quiet window, falling back to
+// 3 seconds if not set.
+func (c *ForgeConfig) TypingQuiet() time.Duration {
+	if c.TypingQuietMs <= 0 {
+		return 3 * time.Second
+	}
+	return time.Duration(c.TypingQuietMs) * time.Millisecond
 }
 
 // PiConfig contains settings for pi executable.
@@ -211,6 +282,26 @@ func (c *Config) Normalize() error {
 		c.SessionManager.DataDir = "/var/lib/pi-session-manager/sessions"
 	}
 	c.SessionManager.APIKey = expandEnv(c.SessionManager.APIKey)
+
+	// Set defaults for forge. The default profile template falls back
+	// to a minimal Anthropic config; the operator can override any
+	// field in the YAML.
+	if c.Forge.URL == "" {
+		c.Forge.URL = "http://localhost:8080"
+	}
+	c.Forge.APIKey = expandEnv(c.Forge.APIKey)
+	if c.Forge.DefaultProfile.Provider == "" {
+		c.Forge.DefaultProfile.Provider = "anthropic"
+	}
+	if c.Forge.DefaultProfile.Model == "" {
+		c.Forge.DefaultProfile.Model = "claude-sonnet-4-20250514"
+	}
+	if c.Forge.DefaultProfile.SystemPrompt == "" {
+		c.Forge.DefaultProfile.SystemPrompt = "You are a helpful coding assistant."
+	}
+	if len(c.Forge.DefaultProfile.Tools) == 0 {
+		c.Forge.DefaultProfile.Tools = []string{"bash", "read", "write", "edit"}
+	}
 	
 	// Set default machine name to hostname if not specified
 	if c.SessionManager.MachineName == "" {
@@ -326,7 +417,12 @@ func Parse(data []byte) (*Config, error) {
 
 // GetExampleConfig returns the example configuration.
 func GetExampleConfig() string {
-	return `# pi-matrix - A Matrix appservice for pi sessions via RPC mode
+	return `# pi-matrix - A Matrix appservice that talks to the forge REST API.
+#
+# The matrix appservice no longer runs its own session manager. It
+# forwards /start, /stop, room messages, and event delivery to forge
+# over HTTP, and uses forge's message log as the source of truth for
+# agent output.
 
 homeserver:
     address: http://localhost:8008
@@ -346,32 +442,45 @@ api:
     port: 8080
 
 bridge:
-    room_name_prefix: "Pi Session"
+    room_name_prefix: "Pi"
     auto_create_rooms: true
     delete_rooms_on_exit: false
     max_sessions: 10
     session_timeout: 0
 
-session_manager:
-    # Server settings
-    host: 0.0.0.0
-    port: 8081
-    url: http://localhost:8081
-    
-    # Auth (appservice uses this to connect)
+# Forge is the durable backend that owns the agent sessions. The
+# appservice talks to it over REST; forge handles spawning pi,
+# running tools, and persisting the message log.
+forge:
+    url: http://localhost:8080
     api_key: ""
-    
-    # pi settings
-    pi_path: pi
-    agent_dir: ~/.pi/agent
-    
-    # Limits
-    max_sessions: 10
-    session_timeout: 0
 
-pi:
-    path: pi
-    agent_dir: ~/.pi/agent
+    # Reconnect backoff for the SSE stream. The consumer
+    # reconnects with exponential backoff on transient errors;
+    # these set the min and max of the range.
+    reconnect_min_ms: 500
+    reconnect_max_ms: 30000
+
+    # Idle window after which a typing_stop is emitted. The agent
+    # is assumed to be done with a turn when no events have
+    # arrived on the SSE stream for this long.
+    typing_quiet_ms: 3000
+
+    # Template for new forge profiles. The matrix appservice
+    # mints one profile per working directory on first /start;
+    # this template is the source of provider, model, system
+    # prompt, and tools.
+    default_profile:
+        provider: anthropic
+        model: claude-sonnet-4-20250514
+        base_url: ""
+        api_key: ""
+        system_prompt: "You are a helpful coding assistant."
+        tools:
+            - bash
+            - read
+            - write
+            - edit
 
 logging:
     level: info

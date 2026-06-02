@@ -153,6 +153,20 @@ func (c *Client) Start() error {
 	// Start the event handler loop
 	go c.eventLoop()
 
+	// Seed the DM room map from synapse's view of the bot's
+	// existing joined rooms. Without this, a freshly-restarted
+	// appservice doesn't recognize DMs users opened in prior
+	// sessions, so /start in those rooms takes the wrong code
+	// path (binds a session to the DM room instead of creating
+	// a fresh session room and inviting the user).
+	go func() {
+		ctx, cancel := context.WithTimeout(c.ctx, 30*time.Second)
+		defer cancel()
+		if err := c.seedExistingDMRooms(ctx); err != nil {
+			c.logger.Warn().Err(err).Msg("failed to seed existing DM rooms; DMs created in prior sessions will be misrouted")
+		}
+	}()
+
 	c.logger.Info().Msg("Matrix client started successfully")
 	return nil
 }
@@ -368,6 +382,48 @@ func (c *Client) CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID,
 		Msg("created DM room")
 
 	return resp.RoomID, nil
+}
+
+// seedExistingDMRooms queries the homeserver for the bot's
+// existing DM rooms and populates dmRooms so a freshly-restarted
+// appservice recognizes rooms users created in past sessions.
+// We classify a room as a DM if the bot is a member and the
+// other-member count is exactly 1.
+func (c *Client) seedExistingDMRooms(ctx context.Context) error {
+	bot := c.as.BotIntent()
+	resp, err := bot.JoinedRooms(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list joined rooms: %w", err)
+	}
+	for _, roomID := range resp.JoinedRooms {
+		members, err := bot.JoinedMembers(ctx, roomID)
+		if err != nil {
+			c.logger.Warn().Err(err).Str("room_id", string(roomID)).Msg("failed to list room members; skipping DM seed")
+			continue
+		}
+		// Members includes the bot itself. A 1:1 DM has exactly 2.
+		if len(members.Joined) != 2 {
+			continue
+		}
+		var other id.UserID
+		for memberID := range members.Joined {
+			if memberID != bot.UserID {
+				other = memberID
+				break
+			}
+		}
+		if other == "" {
+			continue
+		}
+		c.mu.Lock()
+		c.dmRooms[other] = roomID
+		c.mu.Unlock()
+		c.logger.Info().
+			Str("user_id", string(other)).
+			Str("room_id", string(roomID)).
+			Msg("seeded DM room from existing synapse state")
+	}
+	return nil
 }
 
 // CreateSessionRoom creates a Matrix room for a pi session.
