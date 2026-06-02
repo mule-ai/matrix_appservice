@@ -53,8 +53,16 @@ type Client struct {
 	// room registry
 	roomRegistry *RoomRegistry
 
-	// DM tracking - tracks which DM rooms belong to which users
-	dmRooms map[id.UserID]id.RoomID
+	// DM tracking - tracks which DM rooms belong to which users.
+	// We keep a room->user index (for O(1) isDMRoom checks) plus a
+	// user->rooms list (so CreateDMRoom can return an MRU room for a
+	// user who has multiple DMs with the bot). Storing a single
+	// room per user overwrote earlier DMs and caused /start in any
+	// of a user's older 1:1 rooms to fall through to the room-
+	// message handler, which binds the new session to that room
+	// instead of opening a fresh one.
+	dmRoomUser  map[id.RoomID]id.UserID
+	dmUserRooms map[id.UserID][]id.RoomID
 
 	// primary user for bot interactions
 	primaryUser id.UserID
@@ -102,7 +110,8 @@ func NewClient(cfg ClientConfig, ctx context.Context) (*Client, error) {
 		appservice:   cfg.Appservice,
 		bridge:       cfg.Bridge,
 		roomRegistry: NewRoomRegistry(),
-		dmRooms:      make(map[id.UserID]id.RoomID),
+		dmRoomUser:   make(map[id.RoomID]id.UserID),
+		dmUserRooms:  make(map[id.UserID][]id.RoomID),
 		typingState:  NewTypingState(),
 		logger:       *cfg.Logger,
 		ctx:          ctx,
@@ -281,7 +290,8 @@ func (c *Client) handleMemberEvent(evt *event.Event) {
 				c.logger.Info().Str("primary_user", string(c.primaryUser)).Msg("set primary user from invite")
 			}
 			// Track this as a potential DM room
-			c.dmRooms[inviter] = roomID
+			c.dmRoomUser[roomID] = inviter
+			c.dmUserRooms[inviter] = append([]id.RoomID{roomID}, c.dmUserRooms[inviter]...)
 			c.mu.Unlock()
 
 			// Auto-join the room
@@ -298,13 +308,10 @@ func (c *Client) handleMemberEvent(evt *event.Event) {
 		if userIDStr == string(c.as.BotMXID()) {
 			c.mu.Lock()
 			if c.primaryUser == "" {
-				// Try to find inviter from DM tracking
-				for user, dmRoom := range c.dmRooms {
-					if dmRoom == roomID {
-						c.primaryUser = user
-						c.logger.Info().Str("primary_user", string(c.primaryUser)).Msg("set primary user from DM tracking")
-						break
-					}
+				// Look up the other user in the room->user index
+				if other, ok := c.dmRoomUser[roomID]; ok {
+					c.primaryUser = other
+					c.logger.Info().Str("primary_user", string(c.primaryUser)).Msg("set primary user from DM tracking")
 				}
 			}
 			c.mu.Unlock()
@@ -337,25 +344,29 @@ func (c *Client) joinRoom(roomID id.RoomID) {
 	}
 }
 
-// isDMRoom checks if a room is a DM room (tracked in dmRooms).
+// isDMRoom checks if a room is a DM room (tracked in dmRoomUser).
+// Caller must hold c.mu (read or write).
 func (c *Client) isDMRoom(roomID id.RoomID) bool {
-	for _, dmRoom := range c.dmRooms {
-		if dmRoom == roomID {
-			return true
-		}
-	}
-	return false
+	_, ok := c.dmRoomUser[roomID]
+	return ok
 }
 
 // CreateDMRoom creates or returns an existing DM room with a user.
+// If the user has multiple DM rooms (the user could have created
+// more than one 1:1 with the bot, or the seed populates several
+// from prior sessions), the most recently created one is returned.
 func (c *Client) CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID, error) {
-	// Check if DM room already exists
+	// Check if any DM room already exists for this user
 	c.mu.RLock()
-	if existingRoom, ok := c.dmRooms[userID]; ok {
-		c.mu.RUnlock()
-		return existingRoom, nil
+	rooms := c.dmUserRooms[userID]
+	var existingRoom id.RoomID
+	if len(rooms) > 0 {
+		existingRoom = rooms[0]
 	}
 	c.mu.RUnlock()
+	if existingRoom != "" {
+		return existingRoom, nil
+	}
 
 	// Create a new DM room
 	bot := c.as.BotIntent()
@@ -371,9 +382,10 @@ func (c *Client) CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID,
 		return "", fmt.Errorf("failed to create DM room: %w", err)
 	}
 
-	// Track the DM room
+	// Track the DM room in both indexes.
 	c.mu.Lock()
-	c.dmRooms[userID] = resp.RoomID
+	c.dmRoomUser[resp.RoomID] = userID
+	c.dmUserRooms[userID] = []id.RoomID{resp.RoomID}
 	c.mu.Unlock()
 
 	c.logger.Info().
@@ -385,7 +397,7 @@ func (c *Client) CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID,
 }
 
 // seedExistingDMRooms queries the homeserver for the bot's
-// existing DM rooms and populates dmRooms so a freshly-restarted
+// existing DM rooms and populates dmRoomUser/dmUserRooms so a freshly-restarted
 // appservice recognizes rooms users created in past sessions.
 // We classify a room as a DM if the bot is a member and the
 // other-member count is exactly 1.
@@ -416,7 +428,11 @@ func (c *Client) seedExistingDMRooms(ctx context.Context) error {
 			continue
 		}
 		c.mu.Lock()
-		c.dmRooms[other] = roomID
+		// Add the room to both indexes; preserve prior ordering
+		// (the freshly-seeded room is most recent, so it goes to
+		// the front).
+		c.dmRoomUser[roomID] = other
+		c.dmUserRooms[other] = append([]id.RoomID{roomID}, c.dmUserRooms[other]...)
 		c.mu.Unlock()
 		c.logger.Info().
 			Str("user_id", string(other)).
