@@ -429,12 +429,15 @@ func (c *Client) seedExistingDMRooms(ctx context.Context) error {
 // CreateSessionRoom creates a Matrix room for a pi session.
 func (c *Client) CreateSessionRoom(ctx context.Context, sessionDir string, userID id.UserID) (*Room, error) {
 	c.logger.Info().
-		Str("directory", sessionDir).
+		Str("source", sessionDir).
 		Str("user_id", string(userID)).
 		Msg("creating session room")
 
-	// Generate room name
-	roomName := c.bridge.RoomNamePrefix + ": " + filepath.Base(sessionDir)
+	// Generate room name. Strip a trailing `.git` from a repo
+	// URL so the name reads naturally.
+	roomBase := filepath.Base(sessionDir)
+	roomBase = strings.TrimSuffix(roomBase, ".git")
+	roomName := c.bridge.RoomNamePrefix + ": " + roomBase
 
 	// Create the room
 	bot := c.as.BotIntent()

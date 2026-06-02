@@ -53,10 +53,14 @@ type ManagedSession struct {
 	CreatedAt   int64  `json:"created_at"`
 }
 
-// ForgeProfile caches the mapping from (matrix user, working dir)
+// ForgeProfile caches the mapping from (matrix user, source)
 // to a forge profile id. The matrix appservice mints one profile
-// per pair so each new `/start <dir>` can spin up a session
-// against a profile that already has the right working dir.
+// per pair so each new `/start <path-or-url>` can spin up a
+// session against a profile that already has the right repo
+// bound. `WorkingDir` is a misnomer kept for backward compat
+// with the on-disk schema: the column stores whatever the user
+// typed after `/start` (a local path, a `~/` path, or a git
+// URL).
 type ForgeProfile struct {
 	UserID     string `json:"user_id"`
 	WorkingDir string `json:"working_dir"`

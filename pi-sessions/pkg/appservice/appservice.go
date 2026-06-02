@@ -80,8 +80,13 @@ type AppService struct {
 }
 
 type profileKey struct {
-	UserID     string
-	WorkingDir string
+	UserID string
+	// Source is whatever the user typed after `/start`. For a
+	// local path it might be a resolved absolute path; for a git
+	// URL it's the URL verbatim. The cache and SQLite store key
+	// on this so e.g. `/start /tmp/foo` and
+	// `/start https://github.com/foo/bar` never collide.
+	Source string
 }
 
 // NewAppService wires the matrix client, forge client, and event
@@ -241,36 +246,43 @@ func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, arg
 
 	args = extractStartPath(args)
 	if args == "" {
-		as.mxClient.SendNotice(ctx, dmRoom, "Usage: /start <directory>\n\nExample: /start /data/jbutler/git/project\nExample: /start ~/work")
+		as.mxClient.SendNotice(ctx, dmRoom, "Usage:\n"+
+			"  /start <directory>        # bind a session to a local path (cloned into a sandbox)\n"+
+			"  /start <git-url>          # clone a fresh repo into the sandbox and work there\n\n"+
+			"Examples:\n"+
+			"  /start /data/jbutler/git/project\n"+
+			"  /start ~/work\n"+
+			"  /start https://github.com/foo/bar.git\n"+
+			"  /start git@github.com:foo/bar.git")
 		return
 	}
 
-	absPath, err := resolveWorkingDir(args)
+	as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session in %s...", args))
+
+	profileID, err := as.ensureProfile(ctx, string(sender), args)
 	if err != nil {
+		as.logger.Error().Err(err).Str("user_id", string(sender)).Str("source", args).Msg("failed to ensure forge profile")
 		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
 		return
 	}
 
-	as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Starting session in %s...", absPath))
-
-	profileID, err := as.ensureProfile(ctx, string(sender), absPath)
-	if err != nil {
-		as.logger.Error().Err(err).Str("user_id", string(sender)).Str("path", absPath).Msg("failed to ensure forge profile")
-		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
-		return
+	titleBase := filepath.Base(args)
+	if looksLikeGitURL(args) {
+		titleBase = strings.TrimSuffix(filepath.Base(args), ".git")
 	}
-
-	title := fmt.Sprintf("Pi: %s", filepath.Base(absPath))
+	title := fmt.Sprintf("Pi: %s", titleBase)
 	sess, err := as.forge.CreateSession(ctx, profileID, &title)
 	if err != nil {
-		as.logger.Error().Err(err).Str("profile_id", profileID).Str("path", absPath).Msg("failed to create forge session")
+		as.logger.Error().Err(err).Str("profile_id", profileID).Str("source", args).Msg("failed to create forge session")
 		as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Error: %v", err))
 		return
 	}
 
-	room, err := as.mxClient.CreateSessionRoom(ctx, absPath, sender)
+	// The Matrix room topic is also path-derived. We pass the
+	// source arg verbatim -- forge already knows the type.
+	room, err := as.mxClient.CreateSessionRoom(ctx, args, sender)
 	if err != nil {
-		as.logger.Error().Err(err).Str("directory", absPath).Msg("failed to create session room")
+		as.logger.Error().Err(err).Str("source", args).Msg("failed to create session room")
 		// Best-effort cleanup: drop the orphan session.
 		_ = as.forge.DeleteSession(context.Background(), sess.Session.ID)
 		as.mxClient.SendNotice(ctx, dmRoom, "Error: Failed to create session room")
@@ -289,13 +301,13 @@ func (as *AppService) handleStartCommand(sender id.UserID, dmRoom id.RoomID, arg
 		}
 	}
 
-	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started in %s", absPath))
+	as.mxClient.SendNotice(ctx, room.ID, fmt.Sprintf("Welcome! Session started in %s", args))
 	as.mxClient.SendNotice(ctx, dmRoom, fmt.Sprintf("Session started! Join the room: %s", room.ID))
 
 	as.logger.Info().
 		Str("session_id", sess.Session.ID).
 		Str("profile_id", profileID).
-		Str("directory", absPath).
+		Str("source", args).
 		Str("room_id", string(room.ID)).
 		Str("user_id", string(sender)).
 		Msg("new session created")
@@ -535,21 +547,17 @@ func (as *AppService) handleNewCommand(ctx context.Context, roomID id.RoomID) {
 	as.mxClient.SendNotice(ctx, roomID, "Session reset. Previous context has been cleared. Start fresh!")
 }
 
-// handleStartInRoomCommand binds a fresh forge session in
-// `<path>` to the given room. Used when the user is already in a
-// room (typically a DM with the bridge bot that existed before
-// the appservice started) and types `/start /some/path` to
-// attach a session to that room.
+// handleStartInRoomCommand binds a fresh forge session to the
+// given room. Used when the user is already in a room (typically
+// a DM with the bridge bot that existed before the appservice
+// started) and types `/start <path-or-url>` to attach a session
+// to that room.
 func (as *AppService) handleStartInRoomCommand(ctx context.Context, sender id.UserID, roomID id.RoomID, args string) {
 	args = extractStartPath(args)
 	if args == "" {
-		as.mxClient.SendNotice(ctx, roomID, "Usage: /start <directory>\n\nExample: /start /data/jbutler/git/project")
-		return
-	}
-
-	absPath, err := resolveWorkingDir(args)
-	if err != nil {
-		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: %v", err))
+		as.mxClient.SendNotice(ctx, roomID, "Usage:\n"+
+			"  /start <directory>        # bind a session to a local path (cloned into a sandbox)\n"+
+			"  /start <git-url>          # clone a fresh repo into the sandbox and work there")
 		return
 	}
 
@@ -568,19 +576,28 @@ func (as *AppService) handleStartInRoomCommand(ctx context.Context, sender id.Us
 		return
 	}
 
-	as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Starting session in %s...", absPath))
+	as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Starting session in %s...", args))
 
-	profileID, err := as.ensureProfile(ctx, string(sender), absPath)
+	profileID, err := as.ensureProfile(ctx, string(sender), args)
 	if err != nil {
-		as.logger.Error().Err(err).Str("user_id", string(sender)).Str("path", absPath).Msg("failed to ensure forge profile")
+		as.logger.Error().Err(err).Str("user_id", string(sender)).Str("source", args).Msg("failed to ensure forge profile")
 		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: %v", err))
 		return
 	}
 
-	title := fmt.Sprintf("Pi: %s", filepath.Base(absPath))
+	// The room title uses the basename for a path or the host
+	// component for a URL. Either is more readable than the
+	// raw full string.
+	titleBase := filepath.Base(args)
+	if looksLikeGitURL(args) {
+		// Strip trailing ".git" and any path prefix to get
+		// the repo name, e.g. "github.com/foo/bar" -> "bar".
+		titleBase = strings.TrimSuffix(filepath.Base(args), ".git")
+	}
+	title := fmt.Sprintf("Pi: %s", titleBase)
 	sess, err := as.forge.CreateSession(ctx, profileID, &title)
 	if err != nil {
-		as.logger.Error().Err(err).Str("profile_id", profileID).Str("path", absPath).Msg("failed to create forge session")
+		as.logger.Error().Err(err).Str("profile_id", profileID).Str("source", args).Msg("failed to create forge session")
 		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error: %v", err))
 		return
 	}
@@ -596,11 +613,11 @@ func (as *AppService) handleStartInRoomCommand(ctx context.Context, sender id.Us
 		}
 	}
 
-	as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Welcome! Session started in %s", absPath))
+	as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Welcome! Session started in %s", args))
 	as.logger.Info().
 		Str("session_id", sess.Session.ID).
 		Str("profile_id", profileID).
-		Str("directory", absPath).
+		Str("source", args).
 		Str("room_id", string(roomID)).
 		Str("user_id", string(sender)).
 		Msg("new session bound to existing room")
@@ -710,10 +727,11 @@ func (as *AppService) findRoomForSession(sessionID string) id.RoomID {
 //
 // The profile is created from the default_profile template in the
 // appservice config. Operators can change the template by editing
-// the YAML; the cache is keyed on (user, working dir) so a new
-// working dir will pick up the latest template values.
-func (as *AppService) ensureProfile(ctx context.Context, userID, workingDir string) (string, error) {
-	key := profileKey{UserID: userID, WorkingDir: workingDir}
+// the YAML; the cache is keyed on (user, source) so a new
+// source (a path or git URL) will pick up the latest template
+// values.
+func (as *AppService) ensureProfile(ctx context.Context, userID, source string) (string, error) {
+	key := profileKey{UserID: userID, Source: source}
 
 	as.mu.Lock()
 	if pid, ok := as.profileCache[key]; ok {
@@ -724,7 +742,7 @@ func (as *AppService) ensureProfile(ctx context.Context, userID, workingDir stri
 
 	// Check the store.
 	if as.store != nil {
-		cached, err := as.store.GetForgeProfile(userID, workingDir)
+		cached, err := as.store.GetForgeProfile(userID, source)
 		if err == nil && cached != nil {
 			as.mu.Lock()
 			as.profileCache[key] = cached.ProfileID
@@ -733,24 +751,58 @@ func (as *AppService) ensureProfile(ctx context.Context, userID, workingDir stri
 		}
 	}
 
-	// Also check forge directly; another process may have
-	// created a profile with this working dir already.
-	if existing, err := as.forge.FindProfileByWorkingDir(ctx, workingDir); err == nil && existing != nil {
-		as.cacheAndPersistProfile(key, existing.ID, workingDir)
-		return existing.ID, nil
+	// Resolve the source: path or git URL.
+	var profile forge.Profile
+	if looksLikeGitURL(source) {
+		// For a git URL, the source itself doubles as
+		// working_dir (forge stores it for display) and as
+		// git_url (the actual clone target). forge will
+		// clone the URL into a per-session sandbox
+		// directory.
+		profile = as.buildProfileFromTemplate(userID, source)
+		gitURL := source
+		profile.GitURL = &gitURL
+	} else {
+		absPath, err := resolveWorkingDir(source)
+		if err != nil {
+			return "", fmt.Errorf("resolve path: %w", err)
+		}
+		// Also try forge's existing-profile lookup keyed
+		// on the resolved path; another process may have
+		// created one. The cache key is the unresolved
+		// source (so /start /tmp/foo and /start ./tmp/foo
+		// are still distinct), but the forge lookup uses
+		// the resolved path.
+		if existing, err := as.forge.FindProfileByWorkingDir(ctx, absPath); err == nil && existing != nil {
+			as.cacheAndPersistProfile(key, existing.ID, source)
+			return existing.ID, nil
+		}
+		profile = as.buildProfileFromTemplate(userID, absPath)
 	}
 
-	// Mint a new profile from the default template.
+	created, err := as.forge.CreateProfile(ctx, profile)
+	if err != nil {
+		return "", fmt.Errorf("create profile: %w", err)
+	}
+	as.cacheAndPersistProfile(key, created.ID, source)
+	return created.ID, nil
+}
+
+// buildProfileFromTemplate fills a forge.Profile from the
+// default_profile template, applying the user-id+source-derived
+// name and system prompt. The caller fills in WorkingDir (and
+// optionally GitURL).
+func (as *AppService) buildProfileFromTemplate(userID, workingDir string) forge.Profile {
 	tmpl := as.config.Forge.DefaultProfile
 	// Profile name must be unique. Using just the basename
-	// collides when two working dirs share a final component
+	// collides when two paths share a final component
 	// (e.g. `/data/jbutler/git/jbutlerdev/forge` vs
 	// `/opt/pi-matrix/dev /data/jbutler/git/jbutlerdev/forge`
-	// both have basename `forge`). Use the full sanitized path
-	// so each working dir gets a distinct profile.
+	// both have basename `forge`). Use the full sanitized
+	// path so each working dir gets a distinct profile.
 	name := fmt.Sprintf("pi-matrix-%s-%s", sanitizeForName(userID), sanitizeForName(workingDir))
 	systemPrompt := tmpl.SystemPrompt
-	profile := forge.Profile{
+	p := forge.Profile{
 		Name:         name,
 		Provider:     tmpl.Provider,
 		Model:        tmpl.Model,
@@ -760,19 +812,39 @@ func (as *AppService) ensureProfile(ctx context.Context, userID, workingDir stri
 	}
 	if tmpl.BaseURL != "" {
 		s := tmpl.BaseURL
-		profile.BaseURL = &s
+		p.BaseURL = &s
 	}
 	if tmpl.APIKey != "" {
 		s := tmpl.APIKey
-		profile.APIKey = &s
+		p.APIKey = &s
 	}
+	return p
+}
 
-	created, err := as.forge.CreateProfile(ctx, profile)
-	if err != nil {
-		return "", fmt.Errorf("create profile: %w", err)
+// looksLikeGitURL returns true if s looks like a git URL the
+// user typed at a Matrix prompt. We accept:
+//   - http://, https://, git://, ssh://
+//   - git@host:owner/repo (the scp-style syntax GitHub uses)
+//   - anything ending in .git
+//
+// Anything else is treated as a local path. This is a
+// heuristic; a malicious user could type a path that begins
+// with `https://` (none exist on Linux) but no real-world
+// typo would trigger that.
+func looksLikeGitURL(s string) bool {
+	s = strings.TrimSpace(s)
+	switch {
+	case strings.HasPrefix(s, "http://"),
+		strings.HasPrefix(s, "https://"),
+		strings.HasPrefix(s, "git://"),
+		strings.HasPrefix(s, "ssh://"):
+		return true
+	case strings.HasPrefix(s, "git@") && strings.Contains(s, ":"):
+		return true
+	case strings.HasSuffix(s, ".git"):
+		return true
 	}
-	as.cacheAndPersistProfile(key, created.ID, workingDir)
-	return created.ID, nil
+	return false
 }
 
 func (as *AppService) cacheAndPersistProfile(key profileKey, profileID, workingDir string) {

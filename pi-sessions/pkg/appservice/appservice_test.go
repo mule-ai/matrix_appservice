@@ -788,3 +788,38 @@ func TestExtractStartPath(t *testing.T) {
 		})
 	}
 }
+
+func TestLooksLikeGitURL(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		// URLs: detected
+		{"https://github.com/foo/bar.git", true},
+		{"http://internal/git/repo", true},
+		{"git@github.com:foo/bar.git", true},
+		{"git://github.com/foo/bar.git", true},
+		{"ssh://git@github.com/foo/bar.git", true},
+		{"file:///srv/repos/foo.git", true},
+		// Anything ending in .git
+		{"foo/bar.git", true},
+		// Paths: not detected as URLs
+		{"/data/jbutler/git/project", false},
+		{"~/work", false},
+		{"./relative", false},
+		{"../foo", false},
+		// `git` alone (not a path either, but a bare token)
+		{"git", false},
+		// Empty / whitespace
+		{"", false},
+		{"   ", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := looksLikeGitURL(tc.in)
+			if got != tc.want {
+				t.Errorf("looksLikeGitURL(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
