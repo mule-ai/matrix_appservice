@@ -533,30 +533,26 @@ func (as *AppService) handleNewCommand(ctx context.Context, roomID id.RoomID) {
 	// it; if that fails the session is gone anyway, so just
 	// inform the user.
 	oldSess, err := as.forge.GetSession(ctx, oldSessionID)
-	if err != nil || oldSess == nil {
-		as.mxClient.SendNotice(ctx, roomID, "Could not find the existing session. Use /start <path> to start a new one.")
-		as.mu.Lock()
-		delete(as.sessionRooms, oldSessionID)
-		as.mu.Unlock()
-		as.deleteSessionRoom(oldSessionID)
-		if as.consumer != nil {
-			as.consumer.Forget(oldSessionID)
-		}
+	if err != nil || oldSess == nil || oldSess.ProfileID == "" {
+		// We have a room binding but the old session is
+		// unreadable or has no profile. Don't touch the
+		// existing mapping (the session is still in forge's
+		// eyes, even if the response was malformed); just
+		// tell the user to /start fresh.
+		as.mxClient.SendNotice(ctx, roomID, "Could not read the existing session's profile. Use /start <path-or-url> to start a new one.")
 		return
 	}
 
-	if err := as.forge.DeleteSession(ctx, oldSessionID); err != nil {
-		as.logger.Warn().Err(err).Str("session_id", oldSessionID).Msg("failed to delete old session on /new")
-	}
-	as.mu.Lock()
-	delete(as.sessionRooms, oldSessionID)
-	as.mu.Unlock()
-	as.deleteSessionRoom(oldSessionID)
-	if as.consumer != nil {
-		as.consumer.Forget(oldSessionID)
-	}
-
-	// Mint a fresh session against the same profile.
+	// Order matters: create the new session first, then delete
+	// the old. If the create fails, the old session is still
+	// live in forge and the room's binding is intact, so the
+	// user can retry /new or just keep using the old session.
+	// The previous order (delete-then-create) could leave the
+	// user with a deleted session and a room that has no
+	// portal entry, which is the state this user was in
+	// after a buggy /new: forge rejected the new session with
+	// `profile_id: UUID parsing failed: invalid length: 0` and
+	// the room was empty.
 	title := ""
 	if oldSess.Title != nil {
 		title = *oldSess.Title
@@ -566,6 +562,19 @@ func (as *AppService) handleNewCommand(ctx context.Context, roomID id.RoomID) {
 		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf("Error creating new session: %v", err))
 		return
 	}
+
+	// New session is up. Now retire the old.
+	if err := as.forge.DeleteSession(ctx, oldSessionID); err != nil {
+		as.logger.Warn().Err(err).Str("session_id", oldSessionID).Msg("failed to delete old session on /new (new session is already live)")
+	}
+	as.mu.Lock()
+	delete(as.sessionRooms, oldSessionID)
+	as.mu.Unlock()
+	as.deleteSessionRoom(oldSessionID)
+	if as.consumer != nil {
+		as.consumer.Forget(oldSessionID)
+	}
+
 	as.mu.Lock()
 	as.sessionRooms[newSess.Session.ID] = roomID
 	as.mu.Unlock()

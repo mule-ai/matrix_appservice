@@ -218,7 +218,31 @@ func TestCreateSessionPostsJSON(t *testing.T) {
 	}
 }
 
-func TestSendMessagePostsJSON(t *testing.T) {
+// TestGetSessionDecodesWrappedResponse is a regression test
+// for a silent failure in /new. The forge GET /sessions/{id}
+// endpoint wraps its row in `{"session": {...}}` (the same
+// shape as POST /sessions), but the appservice was
+// unmarshaling into a bare *Session, which silently zeroed
+// every field. /new then took that zero-value ProfileID and
+// POSTed a new session with `profile_id: ""`, which forge
+// rejected with `invalid length: 0` — but only after the
+// old session had already been DELETEd, leaving the user
+// with a room that had no session at all. This test pins
+// the wrapper-aware decode so a future refactor can't
+// reintroduce the silent zero.
+// TestGetSessionDecodesWrappedResponse is a regression test
+// for a silent failure in /new. The forge GET /sessions/{id}
+// endpoint wraps its row in `{"session": {...}}` (the same
+// shape as POST /sessions), but the appservice was
+// unmarshaling into a bare *Session, which silently zeroed
+// every field. /new then took that zero-value ProfileID and
+// POSTed a new session with `profile_id: ""`, which forge
+// rejected with `invalid length: 0` — but only after the
+// old session had already been DELETEd, leaving the user
+// with a room that had no session at all. This test pins
+// the wrapper-aware decode so a future refactor can't
+// reintroduce the silent zero.
+func TestGetSessionDecodesWrappedResponse(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotBody CreateMessageRequest
 	f := newFakeForge(t, "", func(w http.ResponseWriter, r *http.Request) {

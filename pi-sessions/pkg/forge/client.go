@@ -326,11 +326,23 @@ func (c *Client) CreateSession(ctx context.Context, profileID string, title *str
 
 // GetSession fetches a session by id.
 func (c *Client) GetSession(ctx context.Context, id string) (*Session, error) {
-	var out Session
+	// forge wraps the row in `{"session": {...}}` (same shape
+	// as the POST /sessions response body). Unmarshaling into
+	// a bare *Session here would silently leave every field
+	// empty, because the response has a top-level object whose
+	// only key is `session`, not the session fields directly.
+	// That bit /new: handleNewCommand used the zero-value
+	// ProfileID to call CreateSession, which forge rejected
+	// with `profile_id: UUID parsing failed: invalid length: 0`
+	// after the old session had already been DELETEd, leaving
+	// the user's room with no session and no obvious way back.
+	var out struct {
+		Session Session `json:"session"`
+	}
 	if err := c.do(ctx, "GET", "/sessions/"+id, nil, &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	return &out.Session, nil
 }
 
 // ListSessions returns all sessions known to forge.

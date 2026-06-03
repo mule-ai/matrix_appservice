@@ -260,7 +260,14 @@ func (f *fakeForge) serve(w http.ResponseWriter, r *http.Request) {
 		sess, ok := f.sessions[sid]
 		f.mu.Unlock()
 		if ok {
-			json.NewEncoder(w).Encode(sess)
+			// Real forge wraps the row in `{"session": {...}}`
+			// (same as POST /sessions). The fake has to match
+			// or the appservice's GetSession unmarshals into
+			// a zero-value Session (it used to silently do
+			// that and the bug only manifested in /new).
+			json.NewEncoder(w).Encode(struct {
+				Session forge.Session `json:"session"`
+			}{Session: sess})
 		} else {
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -808,6 +815,98 @@ func TestNewCommandResetsSession(t *testing.T) {
 	if h.as.sessionRooms[newID] != roomID {
 		t.Errorf("new session should map to the same room")
 	}
+}
+
+// TestNewCommandPreservesOldSessionOnCreateFailure locks in the
+// fail-soft ordering: /new mints the fresh forge session first
+// and only then retires the old one. If CreateSession fails
+// (e.g. forge rejects the new request, or the network is down),
+// the old session must still be live in forge and the room's
+// portal binding must still point at it. The previous order
+// (delete-then-create) deleted the old session, then failed to
+// create the new one, leaving the user with a room that had
+// no session and no obvious way back.
+func TestNewCommandPreservesOldSessionOnCreateFailure(t *testing.T) {
+	ff := newFakeForge()
+	mx := newFakeMx()
+	st := newTestStore(t)
+
+	cfg := &config.Config{
+		Homeserver: config.HomeserverConfig{Domain: "test"},
+		Appservice: config.AppserviceConfig{Localpart: "pi-matrix"},
+		API:        config.APIConfig{Port: 0},
+		Bridge:     config.BridgeConfig{RoomNamePrefix: "Pi"},
+		Forge: config.ForgeConfig{
+			URL:            ff.URL,
+			ReconnectMinMs: 20,
+			ReconnectMaxMs: 50,
+			TypingQuietMs:  50,
+			DefaultProfile: config.ForgeDefaultProfile{
+				Provider: "anthropic", Model: "claude-sonnet-4-20250514",
+				SystemPrompt: "test", Tools: []string{"bash"},
+			},
+		},
+	}
+	cfg.Normalize()
+
+	fc := forge.NewClient(cfg.Forge.URL, "")
+	consumer := forge.NewEventConsumer(forge.EventConsumerConfig{
+		Client:       fc,
+		Logger:       zerolog.Nop(),
+		ReconnectMin: 20 * time.Millisecond,
+		ReconnectMax: 50 * time.Millisecond,
+		TypingQuiet:  50 * time.Millisecond,
+	})
+	as := &AppService{
+		config:       *cfg,
+		mxClient:     mx,
+		forge:        fc,
+		consumer:     consumer,
+		store:        st,
+		sessionRooms: make(map[string]id.RoomID),
+		profileCache: make(map[profileKey]string),
+		logger:       zerolog.Nop(),
+	}
+	consumer.OnEvent(as.onSessionEvent)
+
+	// Bootstrap a session normally.
+	as.onDMMessage("@alice:test", "/start /tmp/proj-f")
+	firstID := mustFirstSessionID(t, ff)
+	if firstID == "" {
+		t.Fatalf("expected a session id")
+	}
+	as.mu.Lock()
+	roomID := as.sessionRooms[firstID]
+	as.mu.Unlock()
+
+	// Now arm the fake forge to reject the next /sessions POST.
+	// We swap the serve() handler so CreateSession returns 422.
+	ff.Server.Close()
+	ff.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/sessions" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			w.Write([]byte(`{"error":"forced failure for test"}`))
+			return
+		}
+		// Everything else (GET /sessions/{id} for the pre-new
+		// lookup, etc.) uses the existing fake handler.
+		ff.serve(w, r)
+	}))
+
+	// Run /new. The new session creation will fail. The old
+	// session must remain bound to the room.
+	as.onRoomMessage(roomID, "@alice:test", "/new")
+
+	as.mu.Lock()
+	if as.sessionRooms[firstID] != roomID {
+		t.Errorf("old session %s was dropped from sessionRooms on /new failure; the user is now in an unbindable room", firstID)
+	}
+	as.mu.Unlock()
+	ff.mu.Lock()
+	if _, ok := ff.sessions[firstID]; !ok {
+		t.Errorf("old session %s was DELETEd from forge despite CreateSession failing; the user is now in an unbindable room", firstID)
+	}
+	ff.mu.Unlock()
 }
 
 func TestStartCommandWithoutArgsShowsUsage(t *testing.T) {
