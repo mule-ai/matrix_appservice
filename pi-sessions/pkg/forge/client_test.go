@@ -317,6 +317,88 @@ func TestDeleteSessionUsesQueryParam(t *testing.T) {
 	}
 }
 
+func TestResetSandboxPostsAndDecodesResult(t *testing.T) {
+	var gotMethod, gotPath, gotQuery string
+	var gotAuth string
+	f := newFakeForge(t, "test-key", func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("X-API-Key")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"status": "ok",
+			"session_id": "abc-123",
+			"noop": false,
+			"root_dir": "/forge/sandbox/forge-abc-123",
+			"note": "per-session rootfs wiped; next bash call will re-cp from /forge/sandbox/base"
+		}`))
+	})
+	c := NewClient(f.URL, "test-key")
+	res, err := c.ResetSandbox(context.Background(), "abc-123")
+	if err != nil {
+		t.Fatalf("ResetSandbox: %v", err)
+	}
+	if gotMethod != "POST" || gotPath != "/admin/sandbox-reset" {
+		t.Errorf("got %s %s, want POST /admin/sandbox-reset", gotMethod, gotPath)
+	}
+	if !strings.Contains(gotQuery, "session_id=abc-123") {
+		t.Errorf("query = %q, want session_id=abc-123", gotQuery)
+	}
+	if gotAuth != "test-key" {
+		t.Errorf("X-API-Key = %q, want test-key", gotAuth)
+	}
+	if res.Noop {
+		t.Errorf("Noop = true, want false (real wipe)")
+	}
+	if res.RootDir != "/forge/sandbox/forge-abc-123" {
+		t.Errorf("RootDir = %q, want /forge/sandbox/forge-abc-123", res.RootDir)
+	}
+	if res.Status != "ok" {
+		t.Errorf("Status = %q, want ok", res.Status)
+	}
+}
+
+func TestResetSandboxNoopIsSuccess(t *testing.T) {
+	// The endpoint returns 200 with `noop: true` when the
+	// session has no container (e.g. a fresh /new that
+	// hasn't been used yet, or one whose container was
+	// already destroyed). The client must treat that as a
+	// successful no-op, not an error.
+	f := newFakeForge(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"status": "ok",
+			"session_id": "fresh-uuid",
+			"noop": true,
+			"root_dir": null,
+			"note": "session had no container; nothing to wipe"
+		}`))
+	})
+	c := NewClient(f.URL, "")
+	res, err := c.ResetSandbox(context.Background(), "fresh-uuid")
+	if err != nil {
+		t.Fatalf("ResetSandbox on noop session: %v", err)
+	}
+	if !res.Noop {
+		t.Errorf("Noop = false, want true for a session with no container")
+	}
+	if res.RootDir != "" {
+		t.Errorf("RootDir = %q, want empty (no container to wipe)", res.RootDir)
+	}
+}
+
+func TestResetSandbox5xxIsError(t *testing.T) {
+	f := newFakeForge(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"sandbox reset failed: out of disk space"}`))
+	})
+	c := NewClient(f.URL, "")
+	if _, err := c.ResetSandbox(context.Background(), "any-uuid"); err == nil {
+		t.Fatalf("expected error for 500, got nil")
+	}
+}
+
 func TestErrorResponseIncludesStatusAndBody(t *testing.T) {
 	f := newFakeForge(t, "", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

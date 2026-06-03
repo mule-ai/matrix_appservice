@@ -563,6 +563,42 @@ func (as *AppService) handleNewCommand(ctx context.Context, roomID id.RoomID) {
 		return
 	}
 
+	// Force the new session's container to re-cp from
+	// base on its first bash call. The point of
+	// tying this to /new is the operator workflow:
+	// they `chroot /forge/sandbox/base apt install
+	// -y foo`, then send /new in the matrix room, and
+	// the new session sees `foo` the moment it runs
+	// its first bash command.
+	//
+	// Without this, the new session's rootfs would be
+	// cp'd at session-create time and the LLM would
+	// see whatever the base looked like at that
+	// moment, not whatever the operator just changed.
+	//
+	// Best-effort: a reset failure is logged and
+	// surfaced to the user, but /new still completes
+	// (the new session is live and usable; the
+	// operator can retry the reset manually or just
+	// live with the older base content).
+	if reset, err := as.forge.ResetSandbox(ctx, newSess.Session.ID); err != nil {
+		as.logger.Warn().
+			Err(err).
+			Str("session_id", newSess.Session.ID).
+			Msg("sandbox reset on /new failed; new session is up but its first bash call will use the rootfs cp'd at create time (operator can retry the reset manually)")
+		as.mxClient.SendNotice(ctx, roomID, fmt.Sprintf(
+			"Session reset, but sandbox reset failed: %v. "+
+				"The new session is live; its first bash call will use the rootfs that was cp'd at create time.",
+			err,
+		))
+	} else if reset != nil {
+		as.logger.Info().
+			Str("session_id", newSess.Session.ID).
+			Bool("noop", reset.Noop).
+			Str("root_dir", reset.RootDir).
+			Msg("sandbox reset on /new: new session's rootfs cleared; next bash call will re-cp from base")
+	}
+
 	// New session is up. Now retire the old.
 	if err := as.forge.DeleteSession(ctx, oldSessionID); err != nil {
 		as.logger.Warn().Err(err).Str("session_id", oldSessionID).Msg("failed to delete old session on /new (new session is already live)")
