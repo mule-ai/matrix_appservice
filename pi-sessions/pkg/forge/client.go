@@ -359,41 +359,6 @@ func (c *Client) DeleteSession(ctx context.Context, id string) error {
 	return c.do(ctx, "DELETE", "/sessions/delete?id="+url.QueryEscape(id), nil, nil)
 }
 
-// SandboxResetResult is the JSON body returned by
-// `POST /admin/sandbox-reset?session_id=…`. The
-// `Noop: true` case means the session had no container
-// to wipe (e.g. a brand-new session whose first bash
-// call hasn't happened yet) — nothing wrong with the
-// request, just nothing to do.
-type SandboxResetResult struct {
-	Status    string `json:"status"`
-	SessionID string `json:"session_id"`
-	Noop      bool   `json:"noop"`
-	RootDir   string `json:"root_dir"`
-	Note      string `json:"note"`
-}
-
-// ResetSandbox wipes the per-session container rootfs
-// (if any) so the next bash call does a fresh
-// `cp -a` from `/forge/sandbox/base/`. The matrix
-// appservice calls this from its `/new` command so a
-// freshly-minted session picks up any out-of-band
-// changes the operator made to the base (apt
-// installs, /etc/ edits) before the first bash
-// call lands.
-//
-// Idempotent: calling on a session that has no
-// container returns `{noop: true}` with HTTP 200; we
-// treat that as success, not an error.
-func (c *Client) ResetSandbox(ctx context.Context, sessionID string) (*SandboxResetResult, error) {
-	path := "/admin/sandbox-reset?session_id=" + url.QueryEscape(sessionID)
-	var out SandboxResetResult
-	if err := c.do(ctx, "POST", path, nil, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
-}
-
 // ============================================
 // Message endpoints
 // ============================================
