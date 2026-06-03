@@ -36,3 +36,9 @@ pi-sessions/pi-session-manager
 pi-sessions/pi-matrix
 pi-sessions/*.tar.gz
 pi-sessions/pkg/bridge/*.go
+
+# pi-session-manager is retired (see SPEC). The reference source is
+# kept locally for the dev who wants to grep it; the SPEC says not
+# to commit it. Add the path explicitly so 'git add -A' doesn't
+# sweep it in.
+pi-sessions/cmd/pi-session-manager/
