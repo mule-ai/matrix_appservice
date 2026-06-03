@@ -616,6 +616,129 @@ func TestForgeEventLandsInRoom(t *testing.T) {
 	}
 }
 
+// TestStartEventsReTracksRestoredSessions is a regression test
+// for a silent failure after appservice restart: the
+// sessionRooms map is restored from the persisted portal store
+// (so user messages can still be forwarded to forge), but the
+// forge event consumer was previously never told to track the
+// restored sessions, so forge's responses never reached the
+// room. StartEvents must call Track on every restored session
+// after starting the consumer.
+func TestStartEventsReTracksRestoredSessions(t *testing.T) {
+	ff := newFakeForge()
+	mx := newFakeMx()
+	st := newTestStore(t)
+
+	cfg := &config.Config{
+		Homeserver: config.HomeserverConfig{Domain: "test"},
+		Appservice: config.AppserviceConfig{Localpart: "pi-matrix"},
+		API:        config.APIConfig{Port: 0},
+		Bridge:     config.BridgeConfig{RoomNamePrefix: "Pi"},
+		Forge: config.ForgeConfig{
+			URL:            ff.URL,
+			ReconnectMinMs: 20,
+			ReconnectMaxMs: 50,
+			TypingQuietMs:  50,
+			DefaultProfile: config.ForgeDefaultProfile{
+				Provider: "anthropic", Model: "claude-sonnet-4-20250514",
+				SystemPrompt: "test", Tools: []string{"bash"},
+			},
+		},
+	}
+	cfg.Normalize()
+
+	fc := forge.NewClient(cfg.Forge.URL, "")
+	consumer := forge.NewEventConsumer(forge.EventConsumerConfig{
+		Client:       fc,
+		Logger:       zerolog.Nop(),
+		ReconnectMin: 20 * time.Millisecond,
+		ReconnectMax: 50 * time.Millisecond,
+		TypingQuiet:  50 * time.Millisecond,
+	})
+
+	const (
+		sessionID = "restored-sess-1"
+		roomID    = "!restored-room:test"
+	)
+	// Persist a portal in the store as if a prior appservice
+	// run had created this session and bound it to the room.
+	if err := st.SavePortal(&store.Portal{
+		SessionID:  sessionID,
+		RoomID:     id.RoomID(roomID),
+		RoomName:   string(id.RoomID(roomID)),
+		PrimaryUser: "@alice:test",
+		CreatedAt:  time.Now().Unix(),
+	}); err != nil {
+		t.Fatalf("SavePortal: %v", err)
+	}
+
+	// Seed the fake forge with the session and one message so
+	// the SSE replay on (re)connect emits it. sequence=1 lets
+	// the consumer's seedHighWaterMark (which calls ListMessages
+	// and picks the max) find a non-zero high-water mark, so
+	// the first connect does NOT replay the same message over
+	// and over. (We want the message to come through the SSE
+	// stream as a live replay after Track runs.)
+	title := "restored"
+	ff.sessions[sessionID] = forge.Session{
+		ID:        sessionID,
+		ProfileID: "p-1",
+		Title:     &title,
+	}
+
+	as := &AppService{
+		config:       *cfg,
+		mxClient:     mx,
+		forge:        fc,
+		consumer:     consumer,
+		store:        st,
+		sessionRooms: make(map[string]id.RoomID),
+		profileCache: make(map[profileKey]string),
+		logger:       zerolog.Nop(),
+	}
+	consumer.OnEvent(as.onSessionEvent)
+
+	// NewAppService would normally call restoreSessionRooms
+	// here. We inline it because the harness constructor
+	// already creates an AppService directly.
+	portals, err := st.GetAllPortals()
+	if err != nil {
+		t.Fatalf("GetAllPortals: %v", err)
+	}
+	for _, p := range portals {
+		as.sessionRooms[p.SessionID] = p.RoomID
+	}
+	if got := len(as.sessionRooms); got != 1 {
+		t.Fatalf("expected 1 restored portal, got %d", got)
+	}
+
+	stop := as.StartEvents(context.Background())
+	defer stop()
+
+	// Add the forge message AFTER the consumer has been
+	// started and is already connected (lastSeq=0 because
+	// the messages list was empty at seed time). The fake
+	// forge's SSE handler returns whatever rows have
+	// sequence > since, so a reconnect with lastSeq=0 picks
+	// it up. (This matches the production case: forge
+	// publishes a message, the consumer is already running,
+	// and on its next reconnect the row comes through.)
+	ff.addAssistantMessage(sessionID, "hi from forge after restart")
+
+	ok := waitFor(t, 3*time.Second, func() bool {
+		msgs, _, _ := mx.snapshot()
+		for _, m := range msgs[id.RoomID(roomID)] {
+			if m.Body == "hi from forge after restart" {
+				return true
+			}
+		}
+		return false
+	})
+	if !ok {
+		t.Fatalf("restored session was not tracked by consumer; forge response never reached the room")
+	}
+}
+
 func TestToolCallEventsLandInRoom(t *testing.T) {
 	h := newHarness(t)
 	h.startPoller()

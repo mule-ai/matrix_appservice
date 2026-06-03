@@ -130,11 +130,40 @@ func NewAppService(
 
 // StartEvents starts the forge event consumer in the background.
 // Returns a stop function the caller invokes at shutdown.
+//
+// On startup, restoreSessionRooms (called from NewAppService)
+// has already populated sessionRooms from the persisted portal
+// store. The consumer is currently not tracking any of those
+// sessions — Track has to be called explicitly per session to
+// open the SSE connection to forge. We do that here, after
+// consumer.Start so each new session is already wired up before
+// we add more.
+//
+// Without this loop, the response path is silently broken after
+// any appservice restart: the user can still send messages
+// (onRoomMessage -> findSessionForRoom hits the restored map
+// and forwards to forge), but forge's response never reaches
+// the room (onSessionEvent is never called because no
+// per-session goroutine is running).
 func (as *AppService) StartEvents(ctx context.Context) func() {
 	if as.consumer == nil {
 		return func() {}
 	}
 	as.consumer.Start(ctx)
+	as.mu.Lock()
+	restored := make([]string, 0, len(as.sessionRooms))
+	for sid := range as.sessionRooms {
+		restored = append(restored, sid)
+	}
+	as.mu.Unlock()
+	for _, sid := range restored {
+		if err := as.consumer.Track(ctx, sid); err != nil {
+			as.logger.Warn().Err(err).Str("session_id", sid).Msg("consumer track on restored session failed; will retry on next event")
+		}
+	}
+	if len(restored) > 0 {
+		as.logger.Info().Int("count", len(restored)).Msg("consumer: re-tracked restored sessions after restart")
+	}
 	return as.consumer.Stop
 }
 

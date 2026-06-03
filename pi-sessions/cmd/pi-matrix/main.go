@@ -136,14 +136,20 @@ func main() {
 		log.Fatal().Err(err).Msg("failed to create Matrix client")
 	}
 
-	_ = appservice.NewAppService(*cfg, mxClient, forgeClient, consumer, st, log.Logger)
+	as := appservice.NewAppService(*cfg, mxClient, forgeClient, consumer, st, log.Logger)
 
 	if err := mxClient.Start(); err != nil {
 		log.Fatal().Err(err).Msg("failed to start Matrix client")
 	}
 
-	// Kick off the forge event consumer.
-	stopConsumer := startConsumer(ctx, consumer)
+	// Kick off the forge event consumer. StartEvents re-tracks
+	// any session-room bindings that were restored from the
+	// portal store; without that the consumer would be running
+	// but not subscribed to any forge SSE stream, so user
+	// messages would still be forwarded to forge (the
+	// sessionRooms map is restored) but forge's responses
+	// would never reach the room.
+	stopConsumer := as.StartEvents(ctx)
 
 	// HTTP server for the appservice endpoint and the health check.
 	httpMux := http.NewServeMux()
