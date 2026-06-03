@@ -5,6 +5,7 @@ package matrix
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"maunium.net/go/mautrix/id"
@@ -67,5 +68,34 @@ func TestIsDMRoomMultipleRoomsPerUser(t *testing.T) {
 	// MRU room, i.e. the last one added.
 	if got[0] != r3 {
 		t.Errorf("CreateDMRoom would return %s, want %s (MRU)", got[0], r3)
+	}
+}
+
+// TestSessionRoomTopicIsPI captures the "is this a session
+// room?" predicate that seedExistingDMRooms uses to decide
+// whether a 2-member room is a real DM or a forge session room.
+// Session rooms always have a topic of the form
+// "Pi session: <source>" (set by CreateSessionRoom in
+// appservice.go), and that prefix is what tells the seed to
+// skip them. Real DMs have either no topic or a user-set
+// topic that does not start with "Pi session:".
+func TestSessionRoomTopicIsPI(t *testing.T) {
+	cases := []struct {
+		topic string
+		isPI  bool
+	}{
+		{"", false},
+		{"just a normal topic", false},
+		{"Pi session: /data/jbutler/git/forge", true},
+		{"Pi session: https://github.com/jbutlerdev/forge", true},
+		{"pi session: lowercase does not match", false},
+		{"Pi sessions: plural does not match", false},
+		{" some prefix Pi session: with leading space", false},
+	}
+	for _, tc := range cases {
+		got := strings.HasPrefix(tc.topic, "Pi session:")
+		if got != tc.isPI {
+			t.Errorf("HasPrefix(%q, \"Pi session:\") = %v, want %v", tc.topic, got, tc.isPI)
+		}
 	}
 }

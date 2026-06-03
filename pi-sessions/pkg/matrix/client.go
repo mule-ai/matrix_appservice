@@ -401,6 +401,22 @@ func (c *Client) CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID,
 // appservice recognizes rooms users created in past sessions.
 // We classify a room as a DM if the bot is a member and the
 // other-member count is exactly 1.
+//
+// The "exactly 2 members" rule is also true of session rooms
+// (a forge session is one user + the bot). We don't want to
+// misclassify those as DMs, because then a plain-text message
+// in an existing session room would hit onDMMessage and be
+// treated as `/start <text>`, which would create a brand-new
+// session room instead of forwarding to the existing session.
+// (That misroute is what bit session 1faa1686-... after the
+// 21:13:45 restart; the new binary's seed saw the freshly-
+// seeded "Pi: forge" room — 2 members, topic "Pi session:
+// https://github.com/jbutlerdev/forge" — and put it in
+// dmRoomUser, after which the user could not longer send a
+// plain message to that session.) Session rooms always have a
+// topic of the form "Pi session: <source>", and a name of the
+// form "Pi: <basename>", so we skip rooms whose topic matches
+// the session-room convention.
 func (c *Client) seedExistingDMRooms(ctx context.Context) error {
 	bot := c.as.BotIntent()
 	resp, err := bot.JoinedRooms(ctx)
@@ -426,6 +442,26 @@ func (c *Client) seedExistingDMRooms(ctx context.Context) error {
 		}
 		if other == "" {
 			continue
+		}
+		// Skip session rooms. A session room has a topic of
+		// "Pi session: <source>" (set by the appservice in
+		// CreateSessionRoom). A 1:1 DM has either no topic
+		// or a user-set topic that doesn't start with
+		// "Pi session:".
+		var topicContent struct {
+			Topic string `json:"topic"`
+		}
+		if err := bot.StateEvent(ctx, roomID, event.StateTopic, "", &topicContent); err == nil {
+			if strings.HasPrefix(topicContent.Topic, "Pi session:") {
+				c.logger.Debug().
+					Str("room_id", string(roomID)).
+					Str("user_id", string(other)).
+					Str("topic", topicContent.Topic).
+					Msg("seedExistingDMRooms: skipping session room (topic starts with 'Pi session:'); treating as a regular room so plain messages reach the existing session")
+				continue
+			}
+		} else {
+			c.logger.Warn().Err(err).Str("room_id", string(roomID)).Msg("seedExistingDMRooms: failed to fetch room topic; falling through to seed as DM")
 		}
 		c.mu.Lock()
 		// Add the room to both indexes; preserve prior ordering
