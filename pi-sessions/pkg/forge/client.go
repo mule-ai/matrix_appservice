@@ -284,6 +284,39 @@ func (c *Client) FindProfileByWorkingDir(ctx context.Context, workingDir string)
 	return nil, nil
 }
 
+// FindProfileByName returns the first profile whose name matches
+// exactly, or nil if no such profile exists.
+//
+// The forge `profiles` table has a UNIQUE constraint on
+// `profiles.name`, so a name lookup is at most one match. The
+// matrix_appservice uses this as an idempotency fallback for
+// git-URL sessions where `working_dir` is the URL itself (so
+// `FindProfileByWorkingDir` would still work) but ALSO for the
+// `Name` field which is derived from
+// `pi-matrix--<userid>--<sanitized-source>` and is what
+// `buildProfileFromTemplate` sets. If the in-memory cache and
+// the persisted store both miss (e.g. matrix_appservice
+// restarted and the store was wiped, or this is a git URL
+// that was provisioned in a previous lifetime), the only way
+// to find the existing profile is by name.
+//
+// As with `FindProfileByWorkingDir`, this is a linear scan
+// over `ListProfiles` because forge has no name index. Fine
+// for the appservice's expected profile count (one per
+// (user, source) pair, dozens tops).
+func (c *Client) FindProfileByName(ctx context.Context, name string) (*Profile, error) {
+	profiles, err := c.ListProfiles(ctx, 100, 0)
+	if err != nil {
+		return nil, err
+	}
+	for i := range profiles {
+		if profiles[i].Name == name {
+			return &profiles[i], nil
+		}
+	}
+	return nil, nil
+}
+
 // CreateProfile creates a new forge profile and returns the created row.
 func (c *Client) CreateProfile(ctx context.Context, req Profile) (*Profile, error) {
 	var out struct {

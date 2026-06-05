@@ -818,6 +818,29 @@ func (as *AppService) ensureProfile(ctx context.Context, userID, source string) 
 		profile = as.buildProfileFromTemplate(userID, absPath)
 	}
 
+	// Idempotency fallback: if a profile with the same
+	// name already exists (e.g. the in-memory cache and
+	// the persisted store both missed, but the profile
+	// was provisioned in a previous lifetime), reuse it
+	// instead of POSTing and getting a 409 Conflict.
+	// forge's `profiles.name` is UNIQUE, so at most one
+	// match. We do this lookup for BOTH paths and git
+	// URLs (the path branch's `FindProfileByWorkingDir`
+	// already handles a different cache-miss case, but
+	// does not cover the name case if `working_dir` was
+	// resolved slightly differently on a previous run).
+	profileName := profile.Name
+	if existing, err := as.forge.FindProfileByName(ctx, profileName); err == nil && existing != nil {
+		as.logger.Info().
+			Str("user_id", userID).
+			Str("source", source).
+			Str("profile_id", existing.ID).
+			Str("profile_name", profileName).
+			Msg("ensureProfile: reusing existing profile by name (in-memory cache and store both missed; profile was provisioned in a previous lifetime)")
+		as.cacheAndPersistProfile(key, existing.ID, source)
+		return existing.ID, nil
+	}
+
 	created, err := as.forge.CreateProfile(ctx, profile)
 	if err != nil {
 		return "", fmt.Errorf("create profile: %w", err)

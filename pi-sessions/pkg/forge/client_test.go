@@ -187,6 +187,40 @@ func TestFindProfileByWorkingDir(t *testing.T) {
 	}
 }
 
+// Regression test for the matrix_appservice idempotency bug:
+// when the in-memory cache and the persisted store both
+// miss (e.g. matrix_appservice restarted and the store was
+// wiped) but the profile was provisioned in a previous
+// lifetime, `ensureProfile` would POST a new profile with
+// the same name and forge-api would return 409 Conflict
+// (after the matching forge-side fix) or 500 (before it).
+// The fix: look up by name before creating.
+func TestFindProfileByName(t *testing.T) {
+	f := newFakeForge(t, "", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"profiles":[
+			{"id":"a","name":"pi-matrix--user1--foo","provider":"anthropic","model":"m","working_dir":"/x"},
+			{"id":"b","name":"pi-matrix--user1--bar","provider":"openai","model":"m","working_dir":"/y"}
+		]}`))
+	})
+	c := NewClient(f.URL, "")
+
+	got, err := c.FindProfileByName(context.Background(), "pi-matrix--user1--bar")
+	if err != nil {
+		t.Fatalf("FindProfileByName: %v", err)
+	}
+	if got == nil || got.ID != "b" {
+		t.Errorf("got %+v, want profile b", got)
+	}
+
+	missing, err := c.FindProfileByName(context.Background(), "does-not-exist")
+	if err != nil {
+		t.Fatalf("FindProfileByName: %v", err)
+	}
+	if missing != nil {
+		t.Errorf("expected nil for missing name, got %+v", missing)
+	}
+}
+
 func TestCreateSessionPostsJSON(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotBody CreateSessionRequest
