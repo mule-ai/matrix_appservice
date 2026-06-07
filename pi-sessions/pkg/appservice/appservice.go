@@ -39,6 +39,8 @@ type matrixClient interface {
 	GetBotUserID() id.UserID
 	CreateDMRoom(ctx context.Context, userID id.UserID) (id.RoomID, error)
 	CreateSessionRoom(ctx context.Context, sessionDir string, userID id.UserID) (*matrix.Room, error)
+	CreateSessionRoomWithMachine(ctx context.Context, machineName, sessionDir string, userID id.UserID) (*matrix.Room, error)
+	InviteUser(ctx context.Context, roomID id.RoomID, userID id.UserID) error
 	SendMessage(ctx context.Context, roomID id.RoomID, content string) error
 	SendNotice(ctx context.Context, roomID id.RoomID, content string) error
 	SetTyping(ctx context.Context, roomID id.RoomID, typing bool) error
@@ -60,12 +62,12 @@ var _ matrixClient = (*matrix.Client)(nil)
 // goroutines; all mutable state is guarded by mu or the per-map
 // locks on the consumer.
 type AppService struct {
-	config    config.Config
-	mxClient  matrixClient
-	forge     *forge.Client
-	consumer  *forge.EventConsumer
-	store     *store.Store
-	mu        sync.Mutex
+	config   config.Config
+	mxClient matrixClient
+	forge    *forge.Client
+	consumer *forge.EventConsumer
+	store    *store.Store
+	mu       sync.Mutex
 
 	// sessionID -> roomID. We keep this map in memory; it is
 	// reconstructed from the store on startup.
