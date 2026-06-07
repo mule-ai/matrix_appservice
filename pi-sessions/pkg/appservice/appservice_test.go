@@ -45,6 +45,10 @@ type fakeMx struct {
 	notices map[id.RoomID][]sentMsg
 	typing  map[id.RoomID]bool
 	rooms   map[string]id.RoomID // by name
+	// invites records every InviteUser call. Used to assert
+	// the re-invite-on-idempotent-path behavior in CreateAgent
+	// tests.
+	invites  map[id.RoomID][]id.UserID
 	creators int
 }
 
@@ -90,6 +94,45 @@ func (m *fakeMx) CreateSessionRoom(ctx context.Context, sessionDir string, userI
 		SessionDir: sessionDir,
 		CreatedAt:  time.Now(),
 	}, nil
+}
+
+// CreateSessionRoomWithMachine is exercised by CreateAgent.
+// Records the machine name and working dir so the test can
+// assert on the final room name format. Also records the
+// initial invite (matching what the real
+// matrix.Client.CreateSessionRoomWithMachine does via
+// bot.CreateRoom's Invite field).
+func (m *fakeMx) CreateSessionRoomWithMachine(ctx context.Context, machineName, sessionDir string, userID id.UserID) (*matrix.Room, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.creators++
+	key := machineName + "|" + sessionDir
+	roomID := id.RoomID(fmt.Sprintf("!room-%x:bot", hashDir(key)))
+	name := "Pi: " + machineName
+	if sessionDir != "" {
+		name = "Pi: " + machineName + ": " + sessionDir
+	}
+	if m.invites == nil {
+		m.invites = make(map[id.RoomID][]id.UserID)
+	}
+	m.invites[roomID] = append(m.invites[roomID], userID)
+	return &matrix.Room{
+		ID:         roomID,
+		Name:       name,
+		SessionDir: sessionDir,
+		CreatedAt:  time.Now(),
+	}, nil
+}
+
+// InviteUser records the invite so tests can assert on it.
+func (m *fakeMx) InviteUser(ctx context.Context, roomID id.RoomID, userID id.UserID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.invites == nil {
+		m.invites = make(map[id.RoomID][]id.UserID)
+	}
+	m.invites[roomID] = append(m.invites[roomID], userID)
+	return nil
 }
 
 func (m *fakeMx) SendMessage(ctx context.Context, roomID id.RoomID, content string) error {
@@ -170,10 +213,10 @@ type fakeForge struct {
 
 func newFakeForge() *fakeForge {
 	f := &fakeForge{
-		profiles:  make(map[string]forge.Profile),
-		sessions:  make(map[string]forge.Session),
-		messages:  make(map[string][]forge.Message),
-		nextMsgN:  make(map[string]int),
+		profiles: make(map[string]forge.Profile),
+		sessions: make(map[string]forge.Session),
+		messages: make(map[string][]forge.Message),
+		nextMsgN: make(map[string]int),
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	return f
@@ -205,6 +248,21 @@ func (f *fakeForge) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		json.NewEncoder(w).Encode(forge.ProfilesList{Profiles: out})
+	case r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/profiles/"):
+		// GET /profiles/<id> — used by CreateAgent to
+		// sanity-check the supplied profile_id. Real forge
+		// returns {"profile": {...}}.
+		pid := strings.TrimPrefix(r.URL.Path, "/profiles/")
+		f.mu.Lock()
+		p, ok := f.profiles[pid]
+		f.mu.Unlock()
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(struct {
+			Profile forge.Profile `json:"profile"`
+		}{Profile: p})
 	case r.Method == "POST" && r.URL.Path == "/sessions":
 		var req forge.CreateSessionRequest
 		json.NewDecoder(r.Body).Decode(&req)
@@ -351,19 +409,44 @@ func (f *fakeForge) sessionCount() int {
 	return len(f.sessions)
 }
 
+// createProfile seeds a profile directly into the fake's
+// in-memory map. Used by tests that want to pre-populate
+// state without going through the HTTP serve() path (e.g.
+// the CreateAgent tests, which mirror what forge's
+// `forge-agent-setup` does before calling CreateAgent).
+func (f *fakeForge) createProfile(p forge.Profile) forge.Profile {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextProfN++
+	p.ID = fmt.Sprintf("p-%d", f.nextProfN)
+	f.profiles[p.ID] = p
+	return p
+}
+
+// createSession seeds a session. Mirrors createProfile.
+func (f *fakeForge) createSession(s forge.Session) forge.Session {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextSessN++
+	sid := fmt.Sprintf("s-%d", f.nextSessN)
+	s.ID = sid
+	f.sessions[sid] = s
+	return s
+}
+
 // ============================================
 // harness
 // ============================================
 
 type harness struct {
-	t       *testing.T
-	cfg     *config.Config
-	ff      *fakeForge
-	mx      *fakeMx
+	t        *testing.T
+	cfg      *config.Config
+	ff       *fakeForge
+	mx       *fakeMx
 	consumer *forge.EventConsumer
-	as      *AppService
-	store   *store.Store
-	stopPol func()
+	as       *AppService
+	store    *store.Store
+	stopPol  func()
 }
 
 func newHarness(t *testing.T) *harness {
@@ -380,11 +463,11 @@ func newHarness(t *testing.T) *harness {
 		API:        config.APIConfig{Port: 0},
 		Bridge:     config.BridgeConfig{RoomNamePrefix: "Pi"},
 		Forge: config.ForgeConfig{
-			URL:             ff.URL,
-			APIKey:          "",
-			ReconnectMinMs:  20,
-			ReconnectMaxMs:  50,
-			TypingQuietMs:   50,
+			URL:            ff.URL,
+			APIKey:         "",
+			ReconnectMinMs: 20,
+			ReconnectMaxMs: 50,
+			TypingQuietMs:  50,
 			DefaultProfile: config.ForgeDefaultProfile{
 				Provider:     "anthropic",
 				Model:        "claude-sonnet-4-20250514",
@@ -397,11 +480,11 @@ func newHarness(t *testing.T) *harness {
 
 	fc := forge.NewClient(cfg.Forge.URL, cfg.Forge.APIKey)
 	consumer := forge.NewEventConsumer(forge.EventConsumerConfig{
-		Client:        fc,
-		Logger:        zerolog.Nop(),
-		ReconnectMin:  20 * time.Millisecond,
-		ReconnectMax:  50 * time.Millisecond,
-		TypingQuiet:   50 * time.Millisecond,
+		Client:       fc,
+		Logger:       zerolog.Nop(),
+		ReconnectMin: 20 * time.Millisecond,
+		ReconnectMax: 50 * time.Millisecond,
+		TypingQuiet:  50 * time.Millisecond,
 	})
 
 	as := &AppService{
@@ -417,14 +500,14 @@ func newHarness(t *testing.T) *harness {
 	consumer.OnEvent(as.onSessionEvent)
 
 	return &harness{
-		t:       t,
-		cfg:     cfg,
-		ff:      ff,
-		mx:      mx,
+		t:        t,
+		cfg:      cfg,
+		ff:       ff,
+		mx:       mx,
 		consumer: consumer,
-		as:      as,
-		store:   st,
-		stopPol: func() { consumer.Stop() },
+		as:       as,
+		store:    st,
+		stopPol:  func() { consumer.Stop() },
 	}
 }
 
@@ -438,7 +521,7 @@ func (h *harness) close() {
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	tmpDB, err := os.CreateTemp("/data", "appservice-test-*.db")
+	tmpDB, err := os.CreateTemp("", "appservice-test-*.db")
 	if err != nil {
 		t.Fatalf("temp db: %v", err)
 	}
@@ -670,11 +753,11 @@ func TestStartEventsReTracksRestoredSessions(t *testing.T) {
 	// Persist a portal in the store as if a prior appservice
 	// run had created this session and bound it to the room.
 	if err := st.SavePortal(&store.Portal{
-		SessionID:  sessionID,
-		RoomID:     id.RoomID(roomID),
-		RoomName:   string(id.RoomID(roomID)),
+		SessionID:   sessionID,
+		RoomID:      id.RoomID(roomID),
+		RoomName:    string(id.RoomID(roomID)),
 		PrimaryUser: "@alice:test",
-		CreatedAt:  time.Now().Unix(),
+		CreatedAt:   time.Now().Unix(),
 	}); err != nil {
 		t.Fatalf("SavePortal: %v", err)
 	}

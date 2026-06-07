@@ -121,9 +121,9 @@ func main() {
 	// created. The consumer opens one SSE connection per active
 	// session to forge's GET /sessions/{id}/events endpoint.
 	consumer := forge.NewEventConsumer(forge.EventConsumerConfig{
-		Client:       forgeClient,
-		Logger:       log.Logger,
-		TypingQuiet:  cfg.Forge.TypingQuiet(),
+		Client:      forgeClient,
+		Logger:      log.Logger,
+		TypingQuiet: cfg.Forge.TypingQuiet(),
 	})
 
 	mxClient, err := matrix.NewClient(matrix.ClientConfig{
@@ -158,6 +158,11 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","service":"appservice"}`)
 	})
+	// Programmatic agent creation: called by forge's
+	// `forge-agent-setup` to provision a Matrix room for
+	// a scheduled agent from the host shell. See
+	// pkg/appservice/agent.go for the implementation.
+	httpMux.HandleFunc("/api/v1/agents", as.HandleCreateAgent)
 
 	httpServer := &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", cfg.API.Host, cfg.API.Port),
