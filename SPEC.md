@@ -135,6 +135,12 @@ Matrix events:
 | `/steer <msg>` | Send a steering message into the running session |
 | `/help` | Show room commands |
 
+**HTTP endpoints** (in addition to `/health` and the matrix appservice protocol):
+
+| Endpoint | Auth | Description |
+|----------|------|-------------|
+| `POST /api/v1/agents` | `X-API-Key` header | Programmatic agent creation. Called by forge's `forge-agent-setup` to provision a Matrix room for a scheduled agent (per-agent forge profile, systemd timer, `heartbeat.md`). See `pkg/appservice/agent.go` and the forge repo's `docs/SCHEDULED-AGENTS.md`. Idempotent: re-runs with the same `session_id` return the existing room. |
+
 ### forge (`forge-api`)
 
 **Location**: runs locally (one per machine that wants to expose sessions)

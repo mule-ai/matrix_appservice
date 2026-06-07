@@ -120,6 +120,14 @@ sshpass -p 'drow22ap' ssh root@10.10.199.186 "journalctl -u pi-matrix -f"
 
 All requests carry `X-API-Key: <key>` from the `forge.api_key` config field.
 
+## HTTP API Surface We Expose
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/_matrix/app/v1/{txn,rooms,users,...}` | mautrix protocol | Standard appservice events from the homeserver |
+| GET  | `/health` | none | Liveness probe |
+| POST | `/api/v1/agents` | `X-API-Key` (matches `api.api_key` in config) | Programmatic agent creation. Body: `{profile_id, session_id, working_dir, user_id, room_name?}`. Returns `{session_id, room_id, matrix_to_url}`. Idempotent on `session_id`. Used by forge's `forge-agent-setup` for scheduled agents; see `pkg/appservice/agent.go` and the forge repo's `docs/SCHEDULED-AGENTS.md`. |
+
 ## Event Reconstruction
 
 forge exposes a Server-Sent Events endpoint at

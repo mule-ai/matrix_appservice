@@ -34,10 +34,26 @@ appservice:
     as_token: "${APPSERVICE_AS_TOKEN}"
     hs_token: "${APPSERVICE_HS_TOKEN}"
 
-# HTTP API server (optional, for debugging and the /health endpoint)
+# HTTP API server
+#
+# The /health and /_matrix/app/v1/ endpoints are always exposed.
+# The /api/v1/agents endpoint is also exposed here; it's used by
+# forge's `forge-agent-setup` script to provision a Matrix room
+# for a scheduled forge agent from the host shell, without going
+# through the DM-driven /start flow.
 api:
     host: 0.0.0.0
     port: 8080
+
+    # API key required for the operator-only endpoints (currently
+    # /api/v1/agents). Send as `X-API-Key: <key>` from the client.
+    #
+    # The forge-agent-setup script reads this from its own
+    # environment (FORGE_API_KEY or MATRIX_AGENT_API_KEY), so the
+    # recommended setup is to use the same key here that forge
+    # itself uses. An empty value disables auth, which is fine
+    # for local-dev but should NOT be used in production.
+    api_key: "${APPSERVICE_API_KEY}"
 
 # Bridge settings
 bridge:
